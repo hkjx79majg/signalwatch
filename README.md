@@ -73,12 +73,14 @@ GET /api/v1/metrics?name=hits&label.route=/a
 
 ### 告警状态 `GET /api/v1/alerts`
 
-从同一一致快照计算全部规则与静默，按 `id` 排序返回 `{"alerts":[...]}`，每项含 `id`、`state`、`value`、`silenced`、`silence_ids`：
+从同一一致快照计算全部规则、静默与抑制，按 `id` 排序返回 `{"alerts":[...]}`，每项含 `id`、`state`、`value`、`silenced`、`silence_ids`、`inhibited`、`inhibition_ids`：
 
 - 每侧对所有匹配的 counter/gauge 当前值求和；histogram 不参与，仅匹配到 histogram 视为无可用序列。
 - 任一侧无可用序列，或 ratio 分母之和为零：`state` 为 `no_data`，`value` 为 `null`。
 - 其余情况 threshold 的 `value` 为和值，ratio 的 `value` 为分子之和除以分母之和；比较成立为 `firing`，否则为 `inactive`。
 - 仅当 `state` 为 `firing`，且某活动静默满足 `starts_at <= 当前时间 < ends_at` 并包含该规则编号时，`silenced` 为 `true`；`silence_ids` 收集所有命中的活动静默编号并按字典序排列。其他情况 `silenced` 为 `false`、`silence_ids` 为空数组。
+- 静默结果算完后再计算抑制：仅当告警原始 `state` 为 `firing`，且某条抑制规则包含该告警编号、同时至少一个**现存源告警**原始 `state` 也为 `firing` 时命中。源告警即使自身被静默或被其他规则抑制，仍可作为触发源；规则可引用尚不存在的告警。
+- `inhibition_ids` 收集全部命中的抑制规则编号并按字典序排列；命中时 `inhibited` 为 `true`，未命中或原始状态为 `inactive`/`no_data` 时为 `false`、`inhibition_ids` 为空数组。抑制不改变告警的 `state`、`value`、`silenced`、`silence_ids` 与排序。
 
 ## 告警静默接口
 
@@ -105,6 +107,30 @@ GET /api/v1/metrics?name=hits&label.route=/a
 - `comment` 必须是字符串（允许空字符串）。
 - 正文不是对象、字段缺失或多出、类型错误、编号非法或重复、时间格式非法、时间区间非法等，一律返回 `400 {"error":{"code":"invalid_silence"}}`，失败的替换不改变旧静默。
 - 每项响应在原始字段外另含由当前时间确定的 `state`：`upcoming`（当前时间早于 `starts_at`）、`active`（`starts_at <= 当前时间 < ends_at`）或 `expired`（当前时间不早于 `ends_at`）。
+- 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
+
+## 告警抑制规则接口
+
+抑制规则只保存在进程内存中，重启即清空。规则 `id` 沿用告警规则编号约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。规则可引用尚不存在的告警规则编号。
+
+### 管理抑制规则
+
+- `PUT /api/v1/inhibit-rules/{id}`：创建或原子替换抑制规则。新建返回 `201`，替换返回 `200`，响应体均为规则本身（含路径 `id`）。
+- `GET /api/v1/inhibit-rules/{id}`：查看规则，返回 `200` 与规则；不存在返回 `404 {"error":{"code":"inhibit_rule_not_found"}}`。
+- `DELETE /api/v1/inhibit-rules/{id}`：删除规则，返回 `204`；不存在返回 `404 inhibit_rule_not_found`。
+- `GET /api/v1/inhibit-rules`：返回 `{"rules":[...]}`，按 `id` 字典序排列；无规则时为空数组。
+
+规则只接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须是单个对象，字段必须恰好完整：
+
+```json
+{"source_rule_ids":["node_down"],
+ "target_rule_ids":["high_cpu","high_disk"],
+ "comment":"节点宕机时抑制其派生告警"}
+```
+
+- `source_rule_ids`、`target_rule_ids` 均为非空字符串数组，各项符合标识符约束，同一数组内不得重复，源集合与目标集合不得相交。
+- `comment` 必须是字符串（允许空字符串）。
+- 正文不是对象、多段 JSON、字段缺失或多出、类型错误、编号非法、数组为空、编号重复或源目交叉等，一律返回 `400 {"error":{"code":"invalid_inhibit_rule"}}`，失败的替换不改变旧规则。
 - 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
 
 ## 验证

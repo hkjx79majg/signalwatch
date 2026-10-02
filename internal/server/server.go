@@ -60,13 +60,18 @@ type metricStore struct {
 	// silences keyed by silence id; same lock so alert evaluation reads
 	// metrics, rules and silences from one consistent snapshot.
 	silences map[string]*silence
+
+	// inhibit rules keyed by rule id; same lock so alert evaluation also
+	// reads inhibit rules from the same consistent snapshot.
+	inhibitions map[string]*inhibitRule
 }
 
 func newMetricStore() *metricStore {
 	return &metricStore{
-		series:   make(map[string]*series),
-		rules:    make(map[string]*alertRule),
-		silences: make(map[string]*silence),
+		series:      make(map[string]*series),
+		rules:       make(map[string]*alertRule),
+		silences:    make(map[string]*silence),
+		inhibitions: make(map[string]*inhibitRule),
 	}
 }
 
@@ -311,6 +316,7 @@ func Handler() http.Handler {
 
 	registerAlertHandlers(mux, store)
 	registerSilenceHandlers(mux, store)
+	registerInhibitHandlers(mux, store)
 
 	return mux
 }

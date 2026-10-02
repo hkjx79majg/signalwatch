@@ -256,15 +256,20 @@ func (s *metricStore) selectorSum(sel *ruleSelector) (sum float64, ok bool) {
 }
 
 type alertOutput struct {
-	ID         string   `json:"id"`
-	State      string   `json:"state"`
-	Value      *float64 `json:"value"`
-	Silenced   bool     `json:"silenced"`
-	SilenceIDs []string `json:"silence_ids"`
+	ID            string   `json:"id"`
+	State         string   `json:"state"`
+	Value         *float64 `json:"value"`
+	Silenced      bool     `json:"silenced"`
+	SilenceIDs    []string `json:"silence_ids"`
+	Inhibited     bool     `json:"inhibited"`
+	InhibitionIDs []string `json:"inhibition_ids"`
 }
 
 // evalAlerts computes every rule against a single consistent snapshot of
-// metrics, rules and silences; results are sorted by rule id.
+// metrics, rules, silences and inhibit rules; results are sorted by rule id.
+// Original state, value and silencing are evaluated first; inhibition is then
+// applied to the original firing states so silenced or inhibited alerts still
+// act as inhibition sources.
 func (s *metricStore) evalAlerts() []alertOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -279,13 +284,17 @@ func (s *metricStore) evalAlerts() []alertOutput {
 	for _, sil := range s.silences {
 		silences = append(silences, sil)
 	}
+	inhibitRules := make([]*inhibitRule, 0, len(s.inhibitions))
+	for _, ir := range s.inhibitions {
+		inhibitRules = append(inhibitRules, ir)
+	}
 	// Evaluation instant and silence windowing share the snapshot.
 	now := time.Now()
 	activeByRule := activeSilencesByRule(silences, now)
 
 	out := make([]alertOutput, 0, len(rules))
 	for _, r := range rules {
-		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}}
+		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}, InhibitionIDs: []string{}}
 
 		var value float64
 		if r.kind == "threshold" {
@@ -318,7 +327,55 @@ func (s *metricStore) evalAlerts() []alertOutput {
 		}
 		out = append(out, al)
 	}
+
+	applyInhibitions(out, inhibitRules)
 	return out
+}
+
+// applyInhibitions annotates alerts with the inhibit rules that hit them. A
+// rule hits an alert when the alert's original state is firing and at least
+// one existing source alert's original state is firing. Sources fire
+// regardless of their own silenced/inhibited flags, and the target's state,
+// value and silencing are left untouched.
+func applyInhibitions(alerts []alertOutput, inhibitRules []*inhibitRule) {
+	firing := make(map[string]bool, len(alerts))
+	for i := range alerts {
+		if alerts[i].State == "firing" {
+			firing[alerts[i].ID] = true
+		}
+	}
+
+	for i := range alerts {
+		if alerts[i].State != "firing" {
+			continue
+		}
+		var hits []string
+		for _, ir := range inhibitRules {
+			if !containsString(ir.targetRuleIDs, alerts[i].ID) {
+				continue
+			}
+			for _, sourceID := range ir.sourceRuleIDs {
+				if firing[sourceID] {
+					hits = append(hits, ir.id)
+					break
+				}
+			}
+		}
+		if len(hits) > 0 {
+			sort.Strings(hits)
+			alerts[i].Inhibited = true
+			alerts[i].InhibitionIDs = hits
+		}
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 func compareHolds(operator string, value, threshold float64) bool {
