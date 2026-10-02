@@ -52,10 +52,17 @@ type series struct {
 type metricStore struct {
 	mu     sync.RWMutex
 	series map[string]*series
+
+	// alert rules keyed by rule id; guarded by mu so rule replacement and
+	// alert evaluation are atomic with metric commits.
+	rules map[string]*alertRule
 }
 
 func newMetricStore() *metricStore {
-	return &metricStore{series: make(map[string]*series)}
+	return &metricStore{
+		series: make(map[string]*series),
+		rules:  make(map[string]*alertRule),
+	}
 }
 
 // validatedSample is a sample that passed all format and value checks.
@@ -296,6 +303,8 @@ func Handler() http.Handler {
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
 	})
+
+	registerAlertHandlers(mux, store)
 
 	return mux
 }
