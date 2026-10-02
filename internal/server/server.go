@@ -30,5 +30,7 @@ func Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(health{Status: "ok", Service: "signalwatch", Version: Version})
 	})
+	store := newMetricsStore()
+	mux.Handle("/api/v1/metrics", http.HandlerFunc(store.serveHTTP))
 	return mux
 }
