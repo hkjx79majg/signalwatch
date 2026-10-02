@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -255,16 +256,20 @@ func (s *metricStore) selectorSum(sel *ruleSelector) (sum float64, ok bool) {
 }
 
 type alertOutput struct {
-	ID    string   `json:"id"`
-	State string   `json:"state"`
-	Value *float64 `json:"value"`
+	ID         string   `json:"id"`
+	State      string   `json:"state"`
+	Value      *float64 `json:"value"`
+	Silenced   bool     `json:"silenced"`
+	SilenceIDs []string `json:"silence_ids"`
 }
 
 // evalAlerts computes every rule against a single consistent snapshot of
-// metrics and rules; results are sorted by rule id.
+// metrics, rules and silences; results are sorted by rule id.
 func (s *metricStore) evalAlerts() []alertOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	now := time.Now()
 
 	rules := make([]*alertRule, 0, len(s.rules))
 	for _, r := range s.rules {
@@ -272,9 +277,21 @@ func (s *metricStore) evalAlerts() []alertOutput {
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].id < rules[j].id })
 
+	// Index currently active silences by the rule ids they cover; silence ids
+	// are sorted per rule below, so map iteration order does not matter.
+	activeByRule := make(map[string][]string)
+	for _, sil := range s.silences {
+		if !sil.activeAt(now) {
+			continue
+		}
+		for _, ruleID := range sil.ruleIDs {
+			activeByRule[ruleID] = append(activeByRule[ruleID], sil.id)
+		}
+	}
+
 	out := make([]alertOutput, 0, len(rules))
 	for _, r := range rules {
-		al := alertOutput{ID: r.id, State: "inactive"}
+		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}}
 
 		var value float64
 		if r.kind == "threshold" {
@@ -300,6 +317,11 @@ func (s *metricStore) evalAlerts() []alertOutput {
 		al.Value = &v
 		if compareHolds(r.operator, value, r.threshold) {
 			al.State = "firing"
+			if hits := activeByRule[r.id]; len(hits) > 0 {
+				al.Silenced = true
+				al.SilenceIDs = append(al.SilenceIDs, hits...)
+				sort.Strings(al.SilenceIDs)
+			}
 		}
 		out = append(out, al)
 	}

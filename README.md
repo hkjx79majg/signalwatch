@@ -73,11 +73,36 @@ GET /api/v1/metrics?name=hits&label.route=/a
 
 ### 告警状态 `GET /api/v1/alerts`
 
-从同一一致快照计算全部规则，按 `id` 排序返回 `{"alerts":[...]}`，每项含 `id`、`state`、`value`：
+从同一一致快照计算全部规则与静默，按 `id` 排序返回 `{"alerts":[...]}`，每项含 `id`、`state`、`value`、`silenced`、`silence_ids`：
 
 - 每侧对所有匹配的 counter/gauge 当前值求和；histogram 不参与，仅匹配到 histogram 视为无可用序列。
 - 任一侧无可用序列，或 ratio 分母之和为零：`state` 为 `no_data`，`value` 为 `null`。
 - 其余情况 threshold 的 `value` 为和值，ratio 的 `value` 为分子之和除以分母之和；比较成立为 `firing`，否则为 `inactive`。
+- 仅当 `state` 为 `firing`，且当前时刻满足 `starts_at <= now < ends_at`、静默包含该规则编号时，`silenced` 为 `true`；`silence_ids` 收集所有命中的活动静默编号并按字典序排列，其他情况为 `false` 与空数组。
+
+## 告警静默接口
+
+静默仅保存在进程内存中，重启即清空。静默 `id` 与正文 `rule_ids` 中的编号均沿用规则编号约束（`[a-zA-Z_][a-zA-Z0-9_]*`，静默 `id` 取自路径）。创建静默时不要求引用的规则已经存在，可以先安排维护窗口。已过期静默继续保留，直到显式删除。
+
+### 管理静默
+
+- `PUT /api/v1/silences/{id}`：创建或原子替换静默。新建返回 `201`，替换返回 `200`，响应体均为静默本身。
+- `GET /api/v1/silences/{id}`：查看静默，返回 `200` 与静默；不存在返回 `404 {"error":{"code":"silence_not_found"}}`。
+- `DELETE /api/v1/silences/{id}`：删除静默，返回 `204`；不存在返回 `404 silence_not_found`。
+- `GET /api/v1/silences`：返回 `{"silences":[...]}`，按 `id` 字典序排列；无静默时为空数组。
+
+静默只接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须是单个对象，字段必须恰好完整：
+
+```json
+{"rule_ids":["high_hits"],"starts_at":"2026-10-03T10:00:00+08:00","ends_at":"2026-10-03T12:00:00+08:00","comment":"维护窗口"}
+```
+
+- `rule_ids` 为非空字符串数组，编号须符合标识符约束且不重复；规则无须预先存在。
+- `starts_at`、`ends_at` 为带时区的 RFC3339 时间字符串，且 `starts_at` 必须严格早于 `ends_at`。
+- `comment` 必须是字符串（允许空字符串）。
+- JSON 结构、字段、编号、时间或时间区间不合法，或正文多出字段，一律返回 `400 {"error":{"code":"invalid_silence"}}`，失败的替换不改变旧静默。
+- 每项响应除 `id` 与原始字段外，另含由当前时间确定的 `status`：`upcoming`（未开始）、`active`（`starts_at <= now < ends_at`）或 `expired`（已结束）。
+- 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
 
 ## 验证
 
