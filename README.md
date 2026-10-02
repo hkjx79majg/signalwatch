@@ -42,6 +42,37 @@ GET /api/v1/metrics?name=hits&label.route=/a
 
 无匹配返回 `200 {"series":[]}`。`name` 缺失或非法、选择器非法、同一标签键值冲突返回 `400 {"error":{"code":"invalid_query"}}`。结果含 `name`、`type`、`labels`；counter/gauge 另含 `value`，histogram 另含 `count`、`sum` 与按边界升序的 `buckets`（每项含 `le` 与累计 `count`，超过最大边界的观测只计入总数与总和）。序列按完整标签键值的规范化字典序排列。
 
+## 告警规则
+
+规则同样只保存在进程内存中，重启即清空。规则 id 沿用指标名约束 `[a-zA-Z_][a-zA-Z0-9_]*`。
+
+### 写入 `PUT /api/v1/alert-rules/{id}`
+
+仅接受 `Content-Type: application/json`。正文为单个规则对象，`kind` 为 `threshold` 或 `ratio`，`operator` 只接受 `gt`、`gte`、`lt`、`lte`，`threshold` 必须是有限数：
+
+```json
+{"kind":"threshold","metric":"hits","labels":{"route":"/a"},"operator":"gt","threshold":10}
+{"kind":"ratio","numerator":{"metric":"err","labels":{}},"denominator":{"metric":"tot","labels":{}},"operator":"gte","threshold":0.5}
+```
+
+- `threshold` 规则用 `metric` 与 `labels` 选择序列；`ratio` 规则用 `numerator`、`denominator` 各提供一组 `metric` 与 `labels`。选择器匹配包含全部指定标签的序列。
+- 字段必须与 `kind` 相符：缺少或多出字段、类型错误、标识符或选择器非法、阈值非有限数、运算符不支持均返回 `400 {"error":{"code":"invalid_rule"}}`，原规则不变。
+- 新建返回 `201`，原子替换返回 `200`，响应体均为规则本身（含 `id`）。非 `application/json` 返回 `415 {"error":{"code":"unsupported_media_type"}}`。
+
+### 读取与删除
+
+- `GET /api/v1/alert-rules` 返回 `{"rules":[...]}`，按 id 字典序排列。
+- `GET /api/v1/alert-rules/{id}` 返回 `200` 及规则；`DELETE /api/v1/alert-rules/{id}` 返回 `204`。不存在的 id 返回 `404 {"error":{"code":"rule_not_found"}}`。
+- 三个端点不支持的方法返回 `405 {"error":{"code":"method_not_allowed"}}` 及相应 `Allow` 头。
+
+### 求值 `GET /api/v1/alerts`
+
+从同一一致快照计算全部规则，按 id 排序返回 `{"alerts":[...]}`，每项含 `id`、`state`、`value`：
+
+- 每侧只对匹配的 counter 与 gauge 当前值求和，histogram 不参与；仅匹配 histogram 视为无可用序列。
+- 比较成立为 `firing`，否则为 `inactive`；任一侧无可用序列或比例分母和为零时为 `no_data`，此时 `value` 为 `null`。
+- 其余情况 `value` 为阈值规则的和值或比例规则的商。
+
 ## 验证
 
 ```bash

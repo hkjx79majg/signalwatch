@@ -24,6 +24,8 @@ import (
 const Version = "0.1.0"
 
 const metricsPath = "/api/v1/metrics"
+const alertRulesPath = "/api/v1/alert-rules"
+const alertsPath = "/api/v1/alerts"
 
 var identPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
@@ -49,13 +51,17 @@ type series struct {
 	sum          float64
 }
 
+// metricStore guards both the series and the alert rules with a single
+// mutex, so alert evaluation always sees one consistent snapshot of metrics
+// and rules even under concurrent writes.
 type metricStore struct {
 	mu     sync.RWMutex
 	series map[string]*series
+	rules  map[string]alertRule
 }
 
 func newMetricStore() *metricStore {
-	return &metricStore{series: make(map[string]*series)}
+	return &metricStore{series: make(map[string]*series), rules: make(map[string]alertRule)}
 }
 
 // validatedSample is a sample that passed all format and value checks.
@@ -295,6 +301,38 @@ func Handler() http.Handler {
 			w.Header().Set("Allow", "GET, POST")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	mux.HandleFunc(alertRulesPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleRuleList(w, store)
+	})
+
+	mux.HandleFunc(alertRulesPath+"/{id}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			handleRulePut(w, r, store)
+		case http.MethodGet:
+			handleRuleGet(w, r, store)
+		case http.MethodDelete:
+			handleRuleDelete(w, r, store)
+		default:
+			w.Header().Set("Allow", "GET, PUT, DELETE")
+			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc(alertsPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleAlertsGet(w, store)
 	})
 
 	return mux
