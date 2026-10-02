@@ -256,11 +256,13 @@ func (s *metricStore) selectorSum(sel *ruleSelector) (sum float64, ok bool) {
 }
 
 type alertOutput struct {
-	ID         string   `json:"id"`
-	State      string   `json:"state"`
-	Value      *float64 `json:"value"`
-	Silenced   bool     `json:"silenced"`
-	SilenceIDs []string `json:"silence_ids"`
+	ID            string   `json:"id"`
+	State         string   `json:"state"`
+	Value         *float64 `json:"value"`
+	Silenced      bool     `json:"silenced"`
+	SilenceIDs    []string `json:"silence_ids"`
+	Inhibited     bool     `json:"inhibited"`
+	InhibitionIDs []string `json:"inhibition_ids"`
 }
 
 // evalAlerts computes every rule against a single consistent snapshot of
@@ -279,13 +281,17 @@ func (s *metricStore) evalAlerts() []alertOutput {
 	for _, sil := range s.silences {
 		silences = append(silences, sil)
 	}
+	inhibitRules := make([]*inhibitRule, 0, len(s.inhibitRules))
+	for _, ir := range s.inhibitRules {
+		inhibitRules = append(inhibitRules, ir)
+	}
 	// Evaluation instant and silence windowing share the snapshot.
 	now := time.Now()
 	activeByRule := activeSilencesByRule(silences, now)
 
 	out := make([]alertOutput, 0, len(rules))
 	for _, r := range rules {
-		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}}
+		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}, InhibitionIDs: []string{}}
 
 		var value float64
 		if r.kind == "threshold" {
@@ -317,6 +323,34 @@ func (s *metricStore) evalAlerts() []alertOutput {
 			}
 		}
 		out = append(out, al)
+	}
+
+	// Second pass over the same snapshot: inhibition is derived from the raw
+	// states computed above, so silenced or themselves-inhibited sources still
+	// trigger, and inhibited alerts keep their original state and value.
+	rawState := make(map[string]string, len(out))
+	for _, al := range out {
+		rawState[al.ID] = al.State
+	}
+	for i := range out {
+		if out[i].State != "firing" {
+			continue
+		}
+		for _, ir := range inhibitRules {
+			if _, isTarget := indexOf(ir.targetRuleIDs, out[i].ID); !isTarget {
+				continue
+			}
+			for _, srcID := range ir.sourceRuleIDs {
+				if rawState[srcID] == "firing" {
+					out[i].Inhibited = true
+					out[i].InhibitionIDs = append(out[i].InhibitionIDs, ir.id)
+					break
+				}
+			}
+		}
+		if out[i].Inhibited {
+			sort.Strings(out[i].InhibitionIDs)
+		}
 	}
 	return out
 }
