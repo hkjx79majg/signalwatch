@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -255,13 +256,15 @@ func (s *metricStore) selectorSum(sel *ruleSelector) (sum float64, ok bool) {
 }
 
 type alertOutput struct {
-	ID    string   `json:"id"`
-	State string   `json:"state"`
-	Value *float64 `json:"value"`
+	ID         string   `json:"id"`
+	State      string   `json:"state"`
+	Value      *float64 `json:"value"`
+	Silenced   bool     `json:"silenced"`
+	SilenceIDs []string `json:"silence_ids"`
 }
 
 // evalAlerts computes every rule against a single consistent snapshot of
-// metrics and rules; results are sorted by rule id.
+// metrics, rules and silences; results are sorted by rule id.
 func (s *metricStore) evalAlerts() []alertOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -272,9 +275,17 @@ func (s *metricStore) evalAlerts() []alertOutput {
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].id < rules[j].id })
 
+	silences := make([]*silence, 0, len(s.silences))
+	for _, sil := range s.silences {
+		silences = append(silences, sil)
+	}
+	// Evaluation instant and silence windowing share the snapshot.
+	now := time.Now()
+	activeByRule := activeSilencesByRule(silences, now)
+
 	out := make([]alertOutput, 0, len(rules))
 	for _, r := range rules {
-		al := alertOutput{ID: r.id, State: "inactive"}
+		al := alertOutput{ID: r.id, State: "inactive", SilenceIDs: []string{}}
 
 		var value float64
 		if r.kind == "threshold" {
@@ -300,6 +311,10 @@ func (s *metricStore) evalAlerts() []alertOutput {
 		al.Value = &v
 		if compareHolds(r.operator, value, r.threshold) {
 			al.State = "firing"
+			if hits := activeByRule[r.id]; len(hits) > 0 {
+				al.Silenced = true
+				al.SilenceIDs = append([]string(nil), hits...)
+			}
 		}
 		out = append(out, al)
 	}

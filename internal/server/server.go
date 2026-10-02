@@ -56,12 +56,17 @@ type metricStore struct {
 	// alert rules keyed by rule id; guarded by mu so rule replacement and
 	// alert evaluation are atomic with metric commits.
 	rules map[string]*alertRule
+
+	// silences keyed by silence id; same lock so alert evaluation reads
+	// metrics, rules and silences from one consistent snapshot.
+	silences map[string]*silence
 }
 
 func newMetricStore() *metricStore {
 	return &metricStore{
-		series: make(map[string]*series),
-		rules:  make(map[string]*alertRule),
+		series:   make(map[string]*series),
+		rules:    make(map[string]*alertRule),
+		silences: make(map[string]*silence),
 	}
 }
 
@@ -305,6 +310,7 @@ func Handler() http.Handler {
 	})
 
 	registerAlertHandlers(mux, store)
+	registerSilenceHandlers(mux, store)
 
 	return mux
 }
