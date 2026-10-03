@@ -68,6 +68,10 @@ type metricStore struct {
 	// notification routes keyed by route id; same lock so the notification
 	// plan reads routes from the same snapshot as alert evaluation.
 	notificationRoutes map[string]*notificationRoute
+
+	// SLO definitions keyed by SLO id; same lock so status evaluation reads
+	// definitions and counters from one consistent snapshot.
+	slos map[string]*sloDefinition
 }
 
 func newMetricStore() *metricStore {
@@ -77,6 +81,7 @@ func newMetricStore() *metricStore {
 		silences:           make(map[string]*silence),
 		inhibitions:        make(map[string]*inhibitRule),
 		notificationRoutes: make(map[string]*notificationRoute),
+		slos:               make(map[string]*sloDefinition),
 	}
 }
 
@@ -323,6 +328,7 @@ func Handler() http.Handler {
 	registerSilenceHandlers(mux, store)
 	registerInhibitHandlers(mux, store)
 	registerNotificationRouteHandlers(mux, store)
+	registerSLOHandlers(mux, store)
 
 	return mux
 }

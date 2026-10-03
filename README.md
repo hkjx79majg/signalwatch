@@ -175,6 +175,41 @@ GET /api/v1/metrics?name=hits&label.route=/a
 - `deliveries` 按 `alert_id` 字典序排列，`unrouted_alert_ids` 按字典序排列；无结果时二者均为空数组。
 - 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
 
+## SLO 与错误预算接口
+
+SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。定义基于进程生命周期的累计 counter，不要求被引用的指标已存在。
+
+### 管理 SLO 定义
+
+- `PUT /api/v1/slos/{id}`：创建或原子替换定义。新建返回 `201`，替换返回 `200`，响应体均为定义本身（含路径 `id`）。
+- `GET /api/v1/slos/{id}`：查看定义，返回 `200` 与定义；不存在返回 `404 {"error":{"code":"slo_not_found"}}`。
+- `DELETE /api/v1/slos/{id}`：删除定义，返回 `204`；不存在返回 `404 slo_not_found`。
+- `GET /api/v1/slos`：返回 `{"slos":[...]}`，按 `id` 字典序排列；无定义时为空数组。
+
+定义只接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须是单个对象，字段必须恰好完整：
+
+```json
+{"objective":0.99,
+ "good":{"metric":"good_events","labels":{"route":"/a"}},
+ "total":{"metric":"total_events","labels":{}},
+ "comment":"首页可用性"}
+```
+
+- `objective` 为 0 到 1 之间（不含端点）的有限数。
+- `good`、`total` 各含 `metric` 与 `labels`；`metric` 与标签键须符合标识符约束，`labels` 必须是字符串对象（不可为 `null`）；选择器匹配包含全部指定标签的序列。
+- `comment` 必须是字符串（允许空字符串）。
+- 正文不是对象、字段缺失或多出、类型错误、标识符非法、标签为 `null` 或 `objective` 非法等，一律返回 `400 {"error":{"code":"invalid_slo"}}`，失败的替换不改变旧定义。
+- 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
+
+### SLO 状态 `GET /api/v1/slo-status`
+
+从定义与指标的**同一一致快照**评估全部定义，按 `id` 排序返回 `{"slos":[...]}`，每项含 `id`、`state`、`good_events`、`total_events`、`compliance`、`error_budget_total`、`error_budget_remaining`、`error_budget_remaining_ratio`：
+
+- 每侧对所有匹配的 **counter** 当前值求和；gauge 与 histogram 不参与，仅匹配到它们视为无可用 counter。
+- 任一侧无可用 counter，或 `total_events` 为 0：`state` 为 `no_data`；聚合结果非有限或 `good_events` 大于 `total_events`：`state` 为 `invalid_data`。两种情况下全部数值字段均为 `null`。
+- 其余情况：`compliance = good_events/total_events`，`error_budget_total = total_events*(1-objective)`，`error_budget_remaining = error_budget_total-(total_events-good_events)`，`error_budget_remaining_ratio = error_budget_remaining/error_budget_total`；后两项允许为负。`compliance` 不低于 `objective` 时 `state` 为 `met`，否则为 `breached`。
+- 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
+
 ## 验证
 
 ```bash
