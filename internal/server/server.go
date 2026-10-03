@@ -332,6 +332,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerInhibitHandlers(mux)
 	registerNotificationRouteHandlers(mux)
 	registerSLOHandlers(mux)
+	registerQueryHandler(mux)
 
 	return withTenants(mux, registry)
 }

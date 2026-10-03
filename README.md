@@ -42,6 +42,22 @@ GET /api/v1/metrics?name=hits&label.route=/a
 
 无匹配返回 `200 {"series":[]}`。`name` 缺失或非法、选择器非法、同一标签键值冲突返回 `400 {"error":{"code":"invalid_query"}}`。结果含 `name`、`type`、`labels`；counter/gauge 另含 `value`，histogram 另含 `count`、`sum` 与按边界升序的 `buckets`（每项含 `le` 与累计 `count`，超过最大边界的观测只计入总数与总和）。序列按完整标签键值的规范化字典序排列。
 
+### 表达式查询 `GET /api/v1/query`
+
+仪表板通过一条表达式筛选并聚合当前指标。请求必须且只能携带一个 `expr` 查询参数：
+
+```
+GET /api/v1/query?expr=sum%20by%20(zone)(hits%7Broute%3D%22/a%22%7D)
+```
+
+- 选择器写作 `metric{key="value",...}`：指标名与标签键沿用标识符约束，标签值采用 JSON 字符串转义；匹配语义与 `label.<key>` 筛选一致（序列包含全部指定标签且值相等）。空选择器 `metric{}` 合法；匹配键不可重复。
+- 聚合支持 `sum(selector)`、`avg(selector)`、`min(selector)`、`max(selector)`，均可写作 `sum by (label,...)(selector)` 形式按标签分组。`sum` 等关键字区分大小写；标点周围的 ASCII 空白（空格、制表、换行等）不影响含义。不接受嵌套聚合、未知函数或重复分组标签；存在尾随内容即非法。
+- 查询只使用匹配的 **counter/gauge 当前值**，histogram 不参与。普通选择器为每条序列返回完整 `labels` 与 `value`；聚合按 `by` 中的标签投影分组，未写 `by` 时产生 `labels` 为空对象的单组；`avg` 按参与序列数计算。没有可用数值序列时返回空结果，不以零代替。
+- 成功统一返回 `200 {"result_type":"vector","result":[{"labels":{},"value":1}]}`；`result` 按现有完整标签规范顺序排列，并基于当前租户的一致快照计算。
+- 若选中的当前值或聚合结果不是有限数（如溢出为 Inf），整个请求返回 `422 {"error":{"code":"invalid_query_data"}}`，不返回部分结果。
+- `expr` 缺失或重复、出现其他查询参数、语法或标识符非法、匹配键或分组键重复、存在尾随内容时，统一返回 `400 {"error":{"code":"invalid_expression"}}`。
+- 仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，且 `invalid_tenant` 优先于表达式校验判定。
+
 ## 告警规则接口
 
 规则仅保存在进程内存中，重启即清空。规则 `id` 沿用指标名约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。
@@ -212,7 +228,7 @@ SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符�
 
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
