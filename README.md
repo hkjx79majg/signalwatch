@@ -73,6 +73,22 @@ GET /api/v1/query?expr=sum%20by%20(zone)(hits%7Broute%3D%22/a%22%7D)
 - `expr` 缺失或重复、出现其他查询参数、语法或标识符非法、匹配键或分组键重复、存在尾随内容时，统一返回 `400 {"error":{"code":"invalid_expression"}}`。
 - 仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，且 `invalid_tenant` 优先于表达式校验判定。
 
+### 历史区间表达式查询 `GET /api/v1/query-range`
+
+仪表板对历史区间执行与 `/api/v1/query` 相同的表达式语言。请求必须且只能携带 `expr`、`start`、`end`、`step` 四个参数，每个恰好出现一次：
+
+```
+GET /api/v1/query-range?expr=sum%20by%20(zone)(hits%7Broute%3D%22/a%22%7D)&start=2026-10-02T00:00:00Z&end=2026-10-03T00:00:00Z&step=60
+```
+
+- `expr` 沿用 `/api/v1/query` 的选择器、sum/avg/min/max 与 by 分组语义；`start`、`end` 为带时区的 RFC3339Nano 且 `start < end`；`step` 为 1 至 3600 的整数秒。时间范围为 `start <= timestamp < end`，各半开窗口从 `start` 起连续切分，窗口总数不得超过 10000。
+- 计算只使用当前租户仍在二十四小时保留期内的 counter/gauge 样本，histogram 不参与；基于一致快照。counter 的窗口值为窗口内增量之和；gauge 取当窗时间最晚的观测，同一时刻取提交顺序靠后者。空窗口不产生点，无点序列不返回；`start` 早于保留边界不是错误，只忽略已过期部分。
+- 普通选择器按完整标签分别返回时间序列；聚合表达式在每个窗口只计算当窗有值的序列，`by` 按既有标签投影分组，`avg` 的除数为该窗口实际参与数；某组当窗无值时不补零。
+- 成功返回 `200 {"result_type":"matrix","result":[{"labels":{},"points":[{"timestamp":"2026-10-03T00:00:00Z","value":1}]}]}`；时间统一为 UTC RFC3339Nano，点按时间升序，结果按完整标签规范顺序排列；没有任何点时 `result` 为空数组。
+- 参数缺失、重复、出现未知参数，或时间格式、区间、步长、窗口数量非法时返回 `400 {"error":{"code":"invalid_query_range"}}`；`expr` 语法或标识符非法、匹配键或分组键重复时返回 `400 {"error":{"code":"invalid_expression"}}`。
+- 任一窗口值或聚合结果为非有限数时整次返回 `422 {"error":{"code":"invalid_query_range_data"}}`，不返回部分结果。
+- 仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离与优先级，读取一致快照。
+
 ## 告警规则接口
 
 规则仅保存在进程内存中，重启即清空。规则 `id` 沿用指标名约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。
