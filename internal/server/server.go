@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Version is the baseline release identifier.
@@ -47,6 +48,11 @@ type series struct {
 	bucketCounts []int64   // cumulative counts per bound, len == len(bucketBounds)
 	count        int64
 	sum          float64
+
+	// history holds accepted samples in commit order for range queries.
+	// Entries older than the retention window are ignored at query time;
+	// evicting them never touches the cumulative state above.
+	history []historyPoint
 }
 
 type metricStore struct {
@@ -107,6 +113,7 @@ type validatedSample struct {
 	labels  map[string]string
 	value   float64
 	buckets []float64 // non-nil for histograms
+	ts      time.Time
 }
 
 // checkAndApply validates the batch against the current state (and against
@@ -168,6 +175,7 @@ func (s *metricStore) checkAndApply(batch []validatedSample) bool {
 				}
 			}
 		}
+		cur.history = append(cur.history, historyPoint{ts: sm.ts, value: sm.value})
 	}
 	return true
 }
@@ -347,6 +355,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerNotificationRouteHandlers(mux)
 	registerSLOHandlers(mux)
 	registerQueryHandler(mux)
+	registerMetricRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
 
@@ -354,6 +363,9 @@ func newHandler(registry *tenantRegistry) http.Handler {
 }
 
 func handleMetricsPost(w http.ResponseWriter, r *http.Request) {
+	// All samples in the request share this single receive instant: it is the
+	// default timestamp and the anchor for the accepted timestamp window.
+	receivedAt := time.Now()
 	store := tenantStore(r)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
@@ -367,9 +379,9 @@ func handleMetricsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	batch, ok := decodeMetricsBatch(body)
-	if !ok {
-		writeAPIError(w, "invalid_metrics", http.StatusBadRequest)
+	batch, code := decodeMetricsBatch(body, receivedAt)
+	if code != "" {
+		writeAPIError(w, code, http.StatusBadRequest)
 		return
 	}
 
@@ -388,62 +400,78 @@ type metricsEnvelope struct {
 }
 
 type rawSample struct {
-	Name    *string            `json:"name"`
-	Type    *string            `json:"type"`
-	Labels  *map[string]string `json:"labels"`
-	Value   *float64           `json:"value"`
-	Buckets *[]float64         `json:"buckets"`
+	Name      *string            `json:"name"`
+	Type      *string            `json:"type"`
+	Labels    *map[string]string `json:"labels"`
+	Value     *float64           `json:"value"`
+	Buckets   *[]float64         `json:"buckets"`
+	Timestamp *string            `json:"timestamp"`
 }
 
-// decodeMetricsBatch performs every format and value check. It never returns a
-// partially validated batch.
-func decodeMetricsBatch(body []byte) ([]validatedSample, bool) {
+// decodeMetricsBatch performs every format and value check, including the
+// optional per-sample timestamp. It never returns a partially validated
+// batch. The returned error code is empty on success.
+func decodeMetricsBatch(body []byte, receivedAt time.Time) ([]validatedSample, string) {
 	var env metricsEnvelope
 	if !strictDecode(body, &env) || env.Samples == nil || len(*env.Samples) == 0 {
-		return nil, false
+		return nil, "invalid_metrics"
 	}
 
 	batch := make([]validatedSample, 0, len(*env.Samples))
 	for _, raw := range *env.Samples {
 		var sm rawSample
 		if !strictDecode(raw, &sm) {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		if sm.Name == nil || sm.Type == nil || sm.Labels == nil || sm.Value == nil {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		name, typ := *sm.Name, *sm.Type
 		if !identPattern.MatchString(name) {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		if typ != "counter" && typ != "gauge" && typ != "histogram" {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		labels := *sm.Labels
 		if labels == nil {
-			return nil, false // explicit null labels
+			return nil, "invalid_metrics" // explicit null labels
 		}
 		for k := range labels {
 			if !identPattern.MatchString(k) {
-				return nil, false
+				return nil, "invalid_metrics"
 			}
 		}
 		value := *sm.Value
 		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, false // encoding/json already rejects NaN/Inf tokens
+			return nil, "invalid_metrics" // encoding/json already rejects NaN/Inf tokens
 		}
 		if typ == "counter" && value < 0 {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 
 		var buckets []float64
 		if typ == "histogram" {
 			if sm.Buckets == nil || !validBuckets(*sm.Buckets) {
-				return nil, false
+				return nil, "invalid_metrics"
 			}
 			buckets = append([]float64(nil), (*sm.Buckets)...)
 		} else if sm.Buckets != nil {
-			return nil, false // buckets only valid on histograms
+			return nil, "invalid_metrics" // buckets only valid on histograms
+		}
+
+		// The timestamp is optional; every sample without one shares the
+		// request's receive instant.
+		ts := receivedAt
+		if sm.Timestamp != nil {
+			parsed, err := time.Parse(time.RFC3339Nano, *sm.Timestamp)
+			if err != nil {
+				return nil, "invalid_metrics"
+			}
+			ts = parsed
+		}
+		if ts.Before(receivedAt.Add(-metricRetention)) || ts.After(receivedAt.Add(maxFutureSkew)) {
+			return nil, "metric_timestamp_out_of_range"
 		}
 
 		batch = append(batch, validatedSample{
@@ -453,9 +481,10 @@ func decodeMetricsBatch(body []byte) ([]validatedSample, bool) {
 			labels:  copyLabels(labels),
 			value:   value,
 			buckets: buckets,
+			ts:      ts,
 		})
 	}
-	return batch, true
+	return batch, ""
 }
 
 func validBuckets(buckets []float64) bool {
