@@ -90,6 +90,10 @@ type metricStore struct {
 	// Spans keyed by tenant-unique "trace_id\x00span_id"; same lock so span
 	// commits and trace reads share the logs snapshot they join against.
 	spans map[string]*span
+
+	// Discovery target snapshot; same lock so reloads swap one immutable
+	// snapshot pointer and queries always read a consistent generation.
+	discovery *discoverySnapshot
 }
 
 func newMetricStore() *metricStore {
@@ -102,6 +106,7 @@ func newMetricStore() *metricStore {
 		slos:               make(map[string]*sloDefinition),
 		logs:               make(map[string]*logEntry),
 		spans:              make(map[string]*span),
+		discovery:          emptyDiscoverySnapshot(),
 	}
 }
 
@@ -359,6 +364,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerQueryRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
+	registerDiscoveryTargetHandlers(mux)
 
 	return withTenants(mux, registry)
 }

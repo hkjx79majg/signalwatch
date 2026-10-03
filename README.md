@@ -331,13 +331,38 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 - 路径编号非法返回 `400 {"error":{"code":"invalid_trace_id"}}`；该端点不接受任何查询参数，非法查询字符串返回 `400 {"error":{"code":"invalid_trace_query"}}`。
 - GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
 
+## 服务发现目标接口
+
+静态目标快照只存于内存，重启后恢复为 `generation` 为 0、`targets` 为空数组。服务不会主动访问任何目标地址。
+
+### 重载 `POST /api/v1/discovery-targets/reload`
+
+```
+POST /api/v1/discovery-targets/reload
+Content-Type: application/json
+
+{"targets":[{"id":"web_1","url":"https://example.com:8443/metrics","labels":{"job":"web"},"enabled":true}]}
+```
+
+- 每个目标恰好包含 `id`、`url`、`labels`、`enabled` 四个字段：`id` 沿用标识符规则 `[a-zA-Z_][a-zA-Z0-9_]*` 且在数组内唯一；`url` 必须是主机非空的绝对 `http`/`https` URL，不允许用户信息、片段或非法端口；`labels` 是非 null 的字符串对象，键沿用指标标签键规则；`enabled` 是布尔值。
+- `targets` 最多 1000 项，允许空数组（清空配置）。
+- 重载先整体校验再原子替换：任一目标非法、`id` 重复、数组缺失或为 null、字段缺失或多出、正文不是单一 JSON 对象时，返回 `400 {"error":{"code":"invalid_discovery_targets"}}`，旧快照与代次均不改变；非 `application/json` 返回 `415 {"error":{"code":"unsupported_media_type"}}`。
+- 成功返回 `200 {"generation":N,"targets":[...]}`；仅当 `id`、`url`、标签内容或 `enabled` 发生变化时 `generation` 才加一，目标顺序或标签键顺序不同不算变化，重复提交相同快照得到相同代次。响应目标按 `id` 字典序排列。
+- POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。
+
+### 查询 `GET /api/v1/discovery-targets`
+
+- 从一致快照返回当前租户的完整配置 `{"generation":N,"targets":[...]}`，目标按 `id` 字典序排列；合法新租户返回 `generation` 为 0、空 `targets` 数组。
+- 不接受任何查询参数，携带查询参数返回 `400 {"error":{"code":"invalid_discovery_query"}}`。
+- GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
+
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载与查询）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
-- 每个租户拥有独立的指标序列、日志、跨度、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集、同编号跨度（`trace_id`+`span_id`）与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合、链路详情的日志关联均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
+- 每个租户拥有独立的指标序列、日志、跨度、告警规则、静默、抑制规则、通知路由、SLO 与服务发现目标快照：同名指标/标签集、同编号跨度（`trace_id`+`span_id`）与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合、链路详情的日志关联、目标快照的重载与查询均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
 - 不同租户使用各自独立的锁与存储，并发访问不同租户既不会串读，也不会互相阻塞；全部状态仍只存于进程内存，重启统一清空。
 - 首次访问尚无数据的合法租户时，集合与计算端点按基线空状态响应（空数组），单项查询/删除沿用对应资源既有的 `not_found` 错误。
 - `GET /healthz` 不参与租户隔离并忽略该头；未知路径保持基线 404 行为。
