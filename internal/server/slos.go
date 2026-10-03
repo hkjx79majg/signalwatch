@@ -220,8 +220,9 @@ func (s *metricStore) evalSLOStatus() []sloStatusOutput {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
-	mux.HandleFunc(slosPath, func(w http.ResponseWriter, r *http.Request) {
+func registerSLOHandlers(mux *http.ServeMux, reg *tenantRegistry) {
+	mux.HandleFunc(slosPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
@@ -233,9 +234,10 @@ func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
 			body = append(body, sloWireJSON(d))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"slos": body})
-	})
+	}))
 
-	mux.HandleFunc(slosPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(slosPrefix, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		id := strings.TrimPrefix(r.URL.Path, slosPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -266,16 +268,16 @@ func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
 			w.Header().Set("Allow", "GET, PUT, DELETE")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	mux.HandleFunc(sloStatusPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(sloStatusPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"slos": store.evalSLOStatus()})
-	})
+		writeJSON(w, http.StatusOK, map[string]any{"slos": requestStore(r).evalSLOStatus()})
+	}))
 }
 
 func handleSLOGet(w http.ResponseWriter, id string, store *metricStore) {

@@ -164,8 +164,9 @@ func (s *metricStore) snapshotSilences() []*silence {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
-	mux.HandleFunc(silencesPath, func(w http.ResponseWriter, r *http.Request) {
+func registerSilenceHandlers(mux *http.ServeMux, reg *tenantRegistry) {
+	mux.HandleFunc(silencesPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
@@ -178,9 +179,10 @@ func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
 			body = append(body, silenceWireJSON(sil, now))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"silences": body})
-	})
+	}))
 
-	mux.HandleFunc(silencesPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(silencesPrefix, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		id := strings.TrimPrefix(r.URL.Path, silencesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -211,7 +213,7 @@ func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
 			w.Header().Set("Allow", "GET, PUT, DELETE")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 }
 
 func handleSilenceGet(w http.ResponseWriter, id string, store *metricStore) {

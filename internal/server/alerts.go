@@ -400,8 +400,9 @@ func compareHolds(operator string, value, threshold float64) bool {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
-	mux.HandleFunc(alertRulesPath, func(w http.ResponseWriter, r *http.Request) {
+func registerAlertHandlers(mux *http.ServeMux, reg *tenantRegistry) {
+	mux.HandleFunc(alertRulesPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
@@ -413,9 +414,10 @@ func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
 			body = append(body, ruleWireJSON(rule))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"rules": body})
-	})
+	}))
 
-	mux.HandleFunc(alertRulesPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(alertRulesPrefix, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		id := strings.TrimPrefix(r.URL.Path, alertRulesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -446,16 +448,16 @@ func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
 			w.Header().Set("Allow", "GET, PUT, DELETE")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	mux.HandleFunc(alertsPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(alertsPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"alerts": store.evalAlerts()})
-	})
+		writeJSON(w, http.StatusOK, map[string]any{"alerts": requestStore(r).evalAlerts()})
+	}))
 }
 
 func handleRuleGet(w http.ResponseWriter, id string, store *metricStore) {

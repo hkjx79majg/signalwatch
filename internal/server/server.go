@@ -3,6 +3,10 @@
 // Besides the baseline process health check, the server accepts in-memory
 // metric samples at /api/v1/metrics. All new responses use JSON. Metric state
 // is process-local and is lost on restart.
+//
+// Every /api/v1 resource is tenant scoped: the X-SignalWatch-Tenant header
+// selects an independent per-tenant state namespace, defaulting to "default"
+// when absent. /healthz is not tenant scoped.
 package server
 
 import (
@@ -300,7 +304,7 @@ func equalBuckets(a, b []float64) bool {
 // Handler returns the HTTP surface served by SignalWatch.
 func Handler() http.Handler {
 	mux := http.NewServeMux()
-	store := newMetricStore()
+	registry := newTenantRegistry()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -312,7 +316,8 @@ func Handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(health{Status: "ok", Service: "signalwatch", Version: Version})
 	})
 
-	mux.HandleFunc(metricsPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(metricsPath, withTenant(registry, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		switch r.Method {
 		case http.MethodGet:
 			handleMetricsGet(w, r, store)
@@ -322,13 +327,13 @@ func Handler() http.Handler {
 			w.Header().Set("Allow", "GET, POST")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	registerAlertHandlers(mux, store)
-	registerSilenceHandlers(mux, store)
-	registerInhibitHandlers(mux, store)
-	registerNotificationRouteHandlers(mux, store)
-	registerSLOHandlers(mux, store)
+	registerAlertHandlers(mux, registry)
+	registerSilenceHandlers(mux, registry)
+	registerInhibitHandlers(mux, registry)
+	registerNotificationRouteHandlers(mux, registry)
+	registerSLOHandlers(mux, registry)
 
 	return mux
 }

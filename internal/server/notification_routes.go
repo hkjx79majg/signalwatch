@@ -145,8 +145,9 @@ func (s *metricStore) snapshotNotificationRoutesLocked() []*notificationRoute {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
-	mux.HandleFunc(notificationRoutesPath, func(w http.ResponseWriter, r *http.Request) {
+func registerNotificationRouteHandlers(mux *http.ServeMux, reg *tenantRegistry) {
+	mux.HandleFunc(notificationRoutesPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
@@ -158,9 +159,10 @@ func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
 			body = append(body, notificationRouteWireJSON(route))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"routes": body})
-	})
+	}))
 
-	mux.HandleFunc(notificationRoutesPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(notificationRoutesPrefix, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		id := strings.TrimPrefix(r.URL.Path, notificationRoutesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -191,20 +193,20 @@ func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
 			w.Header().Set("Allow", "GET, PUT, DELETE")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	mux.HandleFunc(notificationPlanPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(notificationPlanPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		deliveries, unrouted := store.notificationPlan()
+		deliveries, unrouted := requestStore(r).notificationPlan()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"deliveries":         deliveries,
 			"unrouted_alert_ids": unrouted,
 		})
-	})
+	}))
 }
 
 func handleNotificationRouteGet(w http.ResponseWriter, id string, store *metricStore) {

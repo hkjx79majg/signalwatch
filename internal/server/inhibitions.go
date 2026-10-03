@@ -147,8 +147,9 @@ func (s *metricStore) snapshotInhibitRules() []*inhibitRule {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerInhibitHandlers(mux *http.ServeMux, store *metricStore) {
-	mux.HandleFunc(inhibitRulesPath, func(w http.ResponseWriter, r *http.Request) {
+func registerInhibitHandlers(mux *http.ServeMux, reg *tenantRegistry) {
+	mux.HandleFunc(inhibitRulesPath, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
@@ -160,9 +161,10 @@ func registerInhibitHandlers(mux *http.ServeMux, store *metricStore) {
 			body = append(body, inhibitWireJSON(rule))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"rules": body})
-	})
+	}))
 
-	mux.HandleFunc(inhibitRulesPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(inhibitRulesPrefix, withTenant(reg, func(w http.ResponseWriter, r *http.Request) {
+		store := requestStore(r)
 		id := strings.TrimPrefix(r.URL.Path, inhibitRulesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -193,7 +195,7 @@ func registerInhibitHandlers(mux *http.ServeMux, store *metricStore) {
 			w.Header().Set("Allow", "GET, PUT, DELETE")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 }
 
 func handleInhibitGet(w http.ResponseWriter, id string, store *metricStore) {
