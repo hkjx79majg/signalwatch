@@ -261,13 +261,51 @@ GET /api/v1/logs?level=error&label.app=web&limit=50
 - 非法或跨租户游标返回 `400 {"error":{"code":"invalid_cursor"}}`；其他非法参数返回 `400 {"error":{"code":"invalid_log_query"}}`。
 - GET/POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET, POST`。
 
+## 链路接口
+
+跨度只保存在进程内存中，重启即清空。同一租户内由 `trace_id` 与 `span_id` 共同确定唯一跨度；缺失的父跨度不影响写入与查询，父跨度可以稍后到达。
+
+### 写入 `POST /api/v1/spans`
+
+仅接受 `Content-Type: application/json`（否则 `415 unsupported_media_type`）。正文包含非空 `spans` 数组：
+
+```json
+{"spans":[{"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736",
+           "span_id":"0000000000000001",
+           "parent_span_id":null,
+           "service":"web","name":"GET /users",
+           "start_time":"2026-01-02T11:04:05+08:00",
+           "end_time":"2026-01-02T11:04:06.123456789+08:00",
+           "status":"ok",
+           "attributes":{"http.route":"/users"}}]}
+```
+
+- 每项字段必须恰好完整：`trace_id`、`span_id`、`parent_span_id`、`service`、`name`、`start_time`、`end_time`、`status`、`attributes`。
+- `trace_id` 为 32 位小写十六进制；`span_id` 为 16 位小写十六进制；`parent_span_id` 为 `null` 或同格式字符串，且不能等于自身（引用尚不存在的父跨度合法）。
+- `service`、`name` 为非空字符串；`start_time`、`end_time` 为带时区的 RFC3339Nano，且结束时间不早于开始时间；`status` 仅限 `unset`、`ok`、`error`；`attributes` 为键符合标识符约束、值为字符串且均非 null 的对象（允许空对象）。
+- 结构、未知字段或取值非法时整批返回 `400 {"error":{"code":"invalid_spans"}}`，不改变任何状态。
+- 相同内容再次提交（包括批内重复）计为重放；同一 `(trace_id, span_id)` 提交不同内容（时间按瞬间比较，与提交时区无关）使整批返回 `409 {"error":{"code":"span_conflict"}}`。成功原子写入，返回 `202` 及 `{"accepted":N,"replayed":M}`。
+- POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。
+
+### 链路详情 `GET /api/v1/traces/{trace_id}`
+
+```
+GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
+```
+
+- 返回 `{"trace_id":...,"spans":[...],"logs":[...]}`。`spans` 回显跨度全部字段（`parent_span_id` 仍为 `null` 或字符串），时间统一为 UTC RFC3339Nano，按 `start_time` 升序、同一瞬间按 `span_id` 字典序排列；缺失父跨度不影响返回。
+- `logs` 包含当前仍保留（未被淘汰）且 `trace_id` 相同的既有日志，保持日志原字段（含可选 `trace_id`），按 `timestamp` 升序、同一瞬间按 `id` 字典序排列。
+- 没有已存跨度时返回 `404 {"error":{"code":"trace_not_found"}}`；仅有相同编号的日志不会创建链路。
+- 路径编号非法返回 `400 {"error":{"code":"invalid_trace_id"}}`；该端点不接受任何查询参数，非法查询字符串返回 `400 {"error":{"code":"invalid_trace_query"}}`。
+- GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
+
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
-- 每个租户拥有独立的指标序列、日志、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
+- 每个租户拥有独立的指标序列、日志、跨度、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集、同编号跨度（`trace_id`+`span_id`）与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合、链路详情的日志关联均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
 - 不同租户使用各自独立的锁与存储，并发访问不同租户既不会串读，也不会互相阻塞；全部状态仍只存于进程内存，重启统一清空。
 - 首次访问尚无数据的合法租户时，集合与计算端点按基线空状态响应（空数组），单项查询/删除沿用对应资源既有的 `not_found` 错误。
 - `GET /healthz` 不参与租户隔离并忽略该头；未知路径保持基线 404 行为。
