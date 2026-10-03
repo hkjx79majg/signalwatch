@@ -273,7 +273,12 @@ type alertOutput struct {
 func (s *metricStore) evalAlerts() []alertOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.evalAlertsLocked()
+}
 
+// evalAlertsLocked is evalAlerts without locking; callers must hold at least
+// the read lock so the evaluation shares their consistent snapshot.
+func (s *metricStore) evalAlertsLocked() []alertOutput {
 	rules := make([]*alertRule, 0, len(s.rules))
 	for _, r := range s.rules {
 		rules = append(rules, r)
