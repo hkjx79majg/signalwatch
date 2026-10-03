@@ -64,14 +64,19 @@ type metricStore struct {
 	// inhibit rules keyed by rule id; same lock so alert evaluation also
 	// reads inhibit rules from the same consistent snapshot.
 	inhibitions map[string]*inhibitRule
+
+	// notification routes keyed by route id; same lock so the notification
+	// plan reads routes from the same snapshot as alert evaluation.
+	notificationRoutes map[string]*notificationRoute
 }
 
 func newMetricStore() *metricStore {
 	return &metricStore{
-		series:      make(map[string]*series),
-		rules:       make(map[string]*alertRule),
-		silences:    make(map[string]*silence),
-		inhibitions: make(map[string]*inhibitRule),
+		series:             make(map[string]*series),
+		rules:              make(map[string]*alertRule),
+		silences:           make(map[string]*silence),
+		inhibitions:        make(map[string]*inhibitRule),
+		notificationRoutes: make(map[string]*notificationRoute),
 	}
 }
 
@@ -317,6 +322,7 @@ func Handler() http.Handler {
 	registerAlertHandlers(mux, store)
 	registerSilenceHandlers(mux, store)
 	registerInhibitHandlers(mux, store)
+	registerNotificationRouteHandlers(mux, store)
 
 	return mux
 }

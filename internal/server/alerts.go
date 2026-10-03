@@ -273,7 +273,13 @@ type alertOutput struct {
 func (s *metricStore) evalAlerts() []alertOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.evalAlertsLocked()
+}
 
+// evalAlertsLocked computes every rule against a single consistent snapshot
+// already held by the caller. Callers that also need other state (e.g. the
+// notification plan's routes) share one snapshot by holding s.mu themselves.
+func (s *metricStore) evalAlertsLocked() []alertOutput {
 	rules := make([]*alertRule, 0, len(s.rules))
 	for _, r := range s.rules {
 		rules = append(rules, r)

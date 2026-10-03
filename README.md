@@ -133,6 +133,48 @@ GET /api/v1/metrics?name=hits&label.route=/a
 - 正文不是对象、多段 JSON、字段缺失或多出、类型错误、编号非法、数组为空、编号重复或源目交叉等，一律返回 `400 {"error":{"code":"invalid_inhibit_rule"}}`，失败的替换不改变旧规则。
 - 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
 
+## 通知路由接口
+
+通知路由只保存在进程内存中，重启即清空。路由 `id` 与 `receiver` 均沿用标识符约束（`[a-zA-Z_][a-zA-Z0-9_]*`，`id` 取自路径）。创建路由时不要求被引用的告警规则已存在。
+
+### 管理路由
+
+- `PUT /api/v1/notification-routes/{id}`：创建或原子替换路由。新建返回 `201`，替换返回 `200`，响应体均为路由本身（含路径 `id`）。
+- `GET /api/v1/notification-routes/{id}`：查看路由，返回 `200` 与路由；不存在返回 `404 {"error":{"code":"notification_route_not_found"}}`。
+- `DELETE /api/v1/notification-routes/{id}`：删除路由，返回 `204`；不存在返回 `404 notification_route_not_found`。
+- `GET /api/v1/notification-routes`：返回 `{"routes":[...]}`，按 `id` 字典序排列；无路由时为空数组。
+
+路由只接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须是单个对象，字段必须恰好完整：
+
+```json
+{"rule_ids":["high_hits","ratio_fire"],
+ "receiver":"oncall_team",
+ "priority":100,
+ "comment":"高优路由"}
+```
+
+- `rule_ids` 为非空字符串数组，各项符合标识符约束且不重复；可引用尚不存在的告警规则编号。
+- `receiver` 必须符合标识符约束。
+- `priority` 为 `0` 至 `1000` 的整数（含端点）。
+- `comment` 为可空字符串：必须是字符串或 `null`（GET 原样回显，`null` 回显为 `null`），但字段不能缺失。
+- 正文不是对象、多段 JSON、字段缺失或多出、类型错误、编号非法、数组为空、编号重复、`receiver` 非法或优先级越界/非整数等，一律返回 `400 {"error":{"code":"invalid_notification_route"}}`，失败的替换不改变旧路由。
+- 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
+
+### 路由计划 `GET /api/v1/notification-plan`
+
+使用指标、告警规则、静默、抑制与通知路由的**同一一致快照**计算，返回：
+
+```json
+{"deliveries":[{"alert_id":"high_hits","receiver":"oncall_team","route_id":"nr1"}],
+ "unrouted_alert_ids":["other_alert"]}
+```
+
+- 仅 `state` 为 `firing` 且 `silenced`、`inhibited` 均为 `false` 的告警参与；`inactive`、`no_data`、被静默或被抑制的告警既不投递也不计入未路由。
+- 每个参与告警从**包含其规则编号**的路由中选择 `priority` 最小者；优先级相同取 `id` 字典序最小者。
+- 匹配项写入 `deliveries`，每项恰好含 `alert_id`、`receiver`、`route_id`；没有任何路由包含其规则编号的参与告警写入 `unrouted_alert_ids`。
+- `deliveries` 按 `alert_id` 字典序排列，`unrouted_alert_ids` 按字典序排列；无结果时二者均为空数组。
+- 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
+
 ## 验证
 
 ```bash
