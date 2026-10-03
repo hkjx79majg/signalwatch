@@ -42,6 +42,21 @@ GET /api/v1/metrics?name=hits&label.route=/a
 
 无匹配返回 `200 {"series":[]}`。`name` 缺失或非法、选择器非法、同一标签键值冲突返回 `400 {"error":{"code":"invalid_query"}}`。结果含 `name`、`type`、`labels`；counter/gauge 另含 `value`，histogram 另含 `count`、`sum` 与按边界升序的 `buckets`（每项含 `le` 与累计 `count`，超过最大边界的观测只计入总数与总和）。序列按完整标签键值的规范化字典序排列。
 
+### 表达式查询 `GET /api/v1/query`
+
+请求必须且只能携带一个 `expr` 参数，用一条表达式筛选并聚合当前指标：
+
+```
+GET /api/v1/query?expr=sum%20by%20(route)(http_requests{code="200"})
+```
+
+- 选择器写作 `metric{key="value",...}`：指标名与标签键沿用标识符约束，标签值是 JSON 字符串（支持转义），匹配语义与 `label.<key>` 筛选一致；空选择器（`metric` 或 `metric{}`）合法，匹配键不可重复。
+- 聚合支持 `sum(selector)`、`avg(selector)`、`min(selector)`、`max(selector)`，均可写成 `sum by (label,...)(selector)` 的分组形式；关键字区分大小写，标点周围的 ASCII 空白不影响含义；不接受嵌套聚合、未知函数或重复分组标签。
+- 只有匹配的 counter/gauge 当前值参与，histogram 不参与。普通选择器逐序列返回完整 `labels` 与 `value`；聚合按 `by` 标签投影分组，未写 `by` 时产生 `labels` 为空对象的单组，`avg` 按参与序列数计算。没有可用数值序列时返回空结果，不以零代替。
+- 成功返回 `200 {"result_type":"vector","result":[{"labels":{},"value":1}]}`，`result` 按完整标签的规范化字典序排列，并基于当前租户的一致快照。
+- 若选中的当前值或聚合结果不是有限数，整个请求返回 `422 {"error":{"code":"invalid_query_data"}}`，不返回部分结果。
+- `expr` 缺失或重复、出现其他查询参数、语法或标识符非法、匹配键或分组键重复、存在尾随内容，统一返回 `400 {"error":{"code":"invalid_expression"}}`；仅支持 GET，其他方法返回 `405 method_not_allowed` 与 `Allow: GET`。
+
 ## 告警规则接口
 
 规则仅保存在进程内存中，重启即清空。规则 `id` 沿用指标名约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。

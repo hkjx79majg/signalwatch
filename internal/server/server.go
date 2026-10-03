@@ -327,6 +327,15 @@ func newHandler(registry *tenantRegistry) http.Handler {
 		}
 	})
 
+	mux.HandleFunc(queryPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handleQueryGet(w, r)
+	})
+
 	registerAlertHandlers(mux)
 	registerSilenceHandlers(mux)
 	registerInhibitHandlers(mux)
