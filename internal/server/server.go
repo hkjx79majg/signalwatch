@@ -90,6 +90,10 @@ type metricStore struct {
 	// Spans keyed by tenant-unique "trace_id\x00span_id"; same lock so span
 	// commits and trace reads share the logs snapshot they join against.
 	spans map[string]*span
+
+	// Static discovery target snapshot; same lock so reloads and queries
+	// operate on one consistent snapshot.
+	discovery discoverySnapshot
 }
 
 func newMetricStore() *metricStore {
@@ -359,6 +363,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerQueryRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
+	registerDiscoveryHandlers(mux)
 
 	return withTenants(mux, registry)
 }
