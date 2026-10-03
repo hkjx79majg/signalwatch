@@ -72,6 +72,13 @@ type metricStore struct {
 	// SLO definitions keyed by SLO id; same lock so status evaluation reads
 	// definitions and counters from one consistent snapshot.
 	slos map[string]*sloDefinition
+
+	// logs keyed by log id; logRing orders the retained distinct ids by
+	// submission order and logSeq assigns each accepted entry a monotonically
+	// increasing snapshot number. All three share the store lock.
+	logs    map[string]*logEntry
+	logRing logRing
+	logSeq  int64
 }
 
 func newMetricStore() *metricStore {
@@ -82,6 +89,7 @@ func newMetricStore() *metricStore {
 		inhibitions:        make(map[string]*inhibitRule),
 		notificationRoutes: make(map[string]*notificationRoute),
 		slos:               make(map[string]*sloDefinition),
+		logs:               make(map[string]*logEntry),
 	}
 }
 
@@ -333,6 +341,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerNotificationRouteHandlers(mux)
 	registerSLOHandlers(mux)
 	registerQueryHandler(mux)
+	registerLogHandlers(mux)
 
 	return withTenants(mux, registry)
 }
