@@ -226,13 +226,48 @@ SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符�
 - 其余情况：`compliance = good_events/total_events`，`error_budget_total = total_events*(1-objective)`，`error_budget_remaining = error_budget_total-(total_events-good_events)`，`error_budget_remaining_ratio = error_budget_remaining/error_budget_total`；后两项允许为负。`compliance` 不低于 `objective` 时 `state` 为 `met`，否则为 `breached`。
 - 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
 
+## 日志接口
+
+日志只保存在进程内存中，重启即清空。
+
+### 写入 `POST /api/v1/logs`
+
+仅接受 `Content-Type: application/json`（否则 `415 unsupported_media_type`）。正文包含非空 `entries` 数组，单批最多 500 条：
+
+```json
+{"entries":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV",
+             "timestamp":"2026-01-02T03:04:05.123456789Z",
+             "level":"info",
+             "message":"request completed",
+             "labels":{"app":"web"},
+             "trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"}]}
+```
+
+- `id` 为 1 至 128 个可打印 ASCII 字符；`timestamp` 为带时区的 RFC3339Nano；`level` 仅限 `debug`、`info`、`warn`、`error`；`message` 为字符串；`labels` 为字符串对象，键沿用标识符约束；`trace_id` 可选，为 32 位小写十六进制。
+- 结构、未知字段或取值非法时整批返回 `400 {"error":{"code":"invalid_logs"}}`，不改变任何状态。
+- 同一租户内 `id` 唯一：已有 `id` 与新记录的时间瞬间和其余内容相同视为重放，否则整批返回 `409 {"error":{"code":"log_conflict"}}`；批内重复 `id` 同样判定。成功返回 `202` 及 `{"accepted":N,"replayed":M}`。
+- 每个租户按提交顺序保留最近 10000 个不同 `id`，提交后按数组顺序淘汰最早项；重放不刷新顺序，被淘汰 `id` 可再次写入。
+
+### 检索 `GET /api/v1/logs`
+
+首次请求可用 `start`、`end` 选择 `start <= timestamp < end` 的日志，并组合 `level`、`trace_id`、`q` 与 `label.<key>` 过滤；`q` 对 `message` 作区分大小写的子串匹配。`limit` 默认 100，范围 1 至 200：
+
+```
+GET /api/v1/logs?level=error&label.app=web&limit=50
+```
+
+- 结果按 `timestamp` 降序、同一瞬间按 `id` 字典序返回 `{"entries":[...],"next_cursor":...}`；时间统一为 UTC RFC3339Nano；空结果返回空数组与 `null` 游标。
+- `next_cursor` 固定首次条件、页大小与快照上界；后续请求只能携带 `cursor`，新写入不会混入后续页，淘汰可造成缺项但不会重复。
+- 非法或跨租户游标返回 `400 {"error":{"code":"invalid_cursor"}}`；其他非法参数返回 `400 {"error":{"code":"invalid_log_query"}}`。
+- GET/POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET, POST`。
+
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
-- 每个租户拥有独立的指标序列、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
+- 每个租户拥有独立的指标序列、日志、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
 - 不同租户使用各自独立的锁与存储，并发访问不同租户既不会串读，也不会互相阻塞；全部状态仍只存于进程内存，重启统一清空。
 - 首次访问尚无数据的合法租户时，集合与计算端点按基线空状态响应（空数组），单项查询/删除沿用对应资源既有的 `not_found` 错误。
 - `GET /healthz` 不参与租户隔离并忽略该头；未知路径保持基线 404 行为。

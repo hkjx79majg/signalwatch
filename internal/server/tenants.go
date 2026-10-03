@@ -47,6 +47,8 @@ func (r *tenantRegistry) storeFor(name string) *metricStore {
 
 type tenantStoreKey struct{}
 
+type tenantNameKey struct{}
+
 // withTenants isolates every registered /api/v1 endpoint by the
 // X-SignalWatch-Tenant header. A missing header selects the default tenant; a
 // missing, empty, duplicated or malformed value is rejected with
@@ -77,6 +79,7 @@ func withTenants(next *http.ServeMux, registry *tenantRegistry) http.Handler {
 
 		store := registry.storeFor(tenant)
 		ctx := context.WithValue(r.Context(), tenantStoreKey{}, store)
+		ctx = context.WithValue(ctx, tenantNameKey{}, tenant)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -85,4 +88,10 @@ func withTenants(next *http.ServeMux, registry *tenantRegistry) http.Handler {
 // registered /api/v1 endpoint because withTenants runs first.
 func tenantStore(r *http.Request) *metricStore {
 	return r.Context().Value(tenantStoreKey{}).(*metricStore)
+}
+
+// tenantName returns the resolved tenant identifier; same presence guarantee
+// as tenantStore.
+func tenantName(r *http.Request) string {
+	return r.Context().Value(tenantNameKey{}).(string)
 }
