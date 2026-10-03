@@ -80,6 +80,10 @@ type metricStore struct {
 	logs     map[string]*logEntry
 	logOrder []string
 	logSeq   int64
+
+	// Spans keyed by trace id + span id; same lock so span commits and trace
+	// detail reads observe one consistent snapshot with the related logs.
+	spans map[string]*span
 }
 
 func newMetricStore() *metricStore {
@@ -91,6 +95,7 @@ func newMetricStore() *metricStore {
 		notificationRoutes: make(map[string]*notificationRoute),
 		slos:               make(map[string]*sloDefinition),
 		logs:               make(map[string]*logEntry),
+		spans:              make(map[string]*span),
 	}
 }
 
@@ -343,6 +348,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerSLOHandlers(mux)
 	registerQueryHandler(mux)
 	registerLogHandlers(mux)
+	registerSpanHandlers(mux)
 
 	return withTenants(mux, registry)
 }
