@@ -73,6 +73,23 @@ GET /api/v1/query?expr=sum%20by%20(zone)(hits%7Broute%3D%22/a%22%7D)
 - `expr` 缺失或重复、出现其他查询参数、语法或标识符非法、匹配键或分组键重复、存在尾随内容时，统一返回 `400 {"error":{"code":"invalid_expression"}}`。
 - 仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，且 `invalid_tenant` 优先于表达式校验判定。
 
+### 表达式时序查询 `GET /api/v1/query-range`
+
+仪表板对历史区间执行与 `/api/v1/query` 相同的表达式语言。请求必须且只能携带 `expr`、`start`、`end`、`step` 四个查询参数，各出现一次：
+
+```
+GET /api/v1/query-range?expr=sum%20by%20(zone)(hits%7B%7D)&start=2026-10-03T00:00:00Z&end=2026-10-03T03:00:00Z&step=3600
+```
+
+- `expr` 沿用表达式查询的全部语法与语义：选择器 `metric{key="value",...}`、`sum`/`avg`/`min`/`max` 与可选 `by (label,...)` 分组，包括匹配键、分组键不可重复等约束。
+- `start`、`end`、`step` 沿用 `/api/v1/metric-range` 的规则：带时区的 RFC3339Nano 且 `start < end`，`step` 为 1 至 3600 的整数秒；按 `[start,end)` 从 `start` 连续切分半开窗口，窗口总数不得超过 10000。`start` 早于二十四小时保留边界不是错误，只忽略已过期部分。
+- 每窗口值：counter 为窗口内增量之和；gauge 取窗口内时间最晚的观测，同一时刻取提交顺序靠后者；histogram 不参与。空窗口不产生点。
+- 普通选择器按完整标签分别返回时间序列；聚合表达式在每个窗口只对**当窗有值**的序列折叠，`by` 按既有标签投影分组，`avg` 的除数为该窗口实际参与的序列数；某组当窗无值时不补零。
+- 成功返回 `200 {"result_type":"matrix","result":[{"labels":{},"points":[{"timestamp":"2026-10-03T00:00:00Z","value":1}]}]}`；时间戳为窗口起点，统一输出 UTC RFC3339Nano，点按时间升序，序列按完整标签规范顺序排列；没有任何点时 `result` 为空数组。计算基于当前租户的一致快照。
+- 参数缺失、重复、出现未知参数，或时间格式、区间、步长、窗口数量非法时返回 `400 {"error":{"code":"invalid_query_range"}}`；`expr` 语法或标识符非法、匹配键或分组键重复时返回 `400 {"error":{"code":"invalid_expression"}}`。
+- 任一窗口值或聚合结果为非有限数时整次返回 `422 {"error":{"code":"invalid_query_range_data"}}`，不返回部分结果。
+- 仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，且 `invalid_tenant` 优先于参数与表达式校验判定。
+
 ## 告警规则接口
 
 规则仅保存在进程内存中，重启即清空。规则 `id` 沿用指标名约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。
@@ -316,7 +333,7 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。

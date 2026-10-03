@@ -356,6 +356,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerSLOHandlers(mux)
 	registerQueryHandler(mux)
 	registerMetricRangeHandler(mux)
+	registerQueryRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
 
