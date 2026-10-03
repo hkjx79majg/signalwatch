@@ -28,8 +28,9 @@ go run ./cmd/signalwatch
 - `type` 为 `counter`（非负增量累加）、`gauge`（覆盖旧值）或 `histogram`（记录观测）。
 - `value` 必须是有限数；`counter` 不接受负数。
 - `histogram` 额外携带严格递增的有限数 `buckets`，边界在该序列首次写入时确定，后续写入必须完全一致。
-- 整个批次按数组顺序原子提交；成功返回 `202` 与 `{"accepted":N}`。
-- 格式或取值非法返回 `400 {"error":{"code":"invalid_metrics"}}`；序列 type 或桶边界冲突返回 `409 {"error":{"code":"metric_conflict"}}`，失败批次不改变状态。
+- `timestamp` 可选，为带时区的 RFC3339Nano 字符串；缺省时同批所有样本统一使用请求开始处理的同一时刻。早于接收时刻二十四小时或晚于接收时刻五分钟的样本使整批返回 `400 {"error":{"code":"metric_timestamp_out_of_range"}}`。
+- 整个批次按数组顺序原子提交；成功返回 `202` 与 `{"accepted":N}`。每条被接受的样本同时按提交顺序追加到该序列的历史记录中，供时序查询使用。
+- 格式或取值非法（含 `timestamp` 格式非法）返回 `400 {"error":{"code":"invalid_metrics"}}`；序列 type 或桶边界冲突返回 `409 {"error":{"code":"metric_conflict"}}`，失败批次不改变状态，也不留下历史记录。
 - 非 `application/json` 请求返回 `415`；GET/POST 以外的方法返回 `405`，`Allow: GET, POST`。
 
 ### 查询 `GET /api/v1/metrics`
@@ -41,6 +42,21 @@ GET /api/v1/metrics?name=hits&label.route=/a
 ```
 
 无匹配返回 `200 {"series":[]}`。`name` 缺失或非法、选择器非法、同一标签键值冲突返回 `400 {"error":{"code":"invalid_query"}}`。结果含 `name`、`type`、`labels`；counter/gauge 另含 `value`，histogram 另含 `count`、`sum` 与按边界升序的 `buckets`（每项含 `le` 与累计 `count`，超过最大边界的观测只计入总数与总和）。序列按完整标签键值的规范化字典序排列。
+
+### 时序查询 `GET /api/v1/metric-range`
+
+按时间窗口回看最近二十四小时内已接受的样本：
+
+```
+GET /api/v1/metric-range?name=hits&label.route=/a&start=2026-01-01T00:00:00Z&end=2026-01-01T01:00:00Z&step=300
+```
+
+- 只接受 `name`、`label.<key>`、`start`、`end`、`step` 参数。`name`、`start`、`end`、`step` 必须各出现恰好一次；`label.<key>` 可选但同一标签键不可重复。`start`、`end` 为带时区的 RFC3339Nano 且 `start` 严格早于 `end`；`step` 为 1 至 3600 的整数秒。
+- 时间范围为 `start <= timestamp < end`；从 `start` 起按 `step` 连续切分半开窗口（最后一个窗口可被 `end` 截断），窗口总数不得超过 10000。
+- 每个租户独立保留已接受的历史样本；查询时按服务器当前时间裁掉超过二十四小时的记录。`start` 早于保留边界不是错误，只返回仍保留的部分。淘汰历史不回退 `GET /api/v1/metrics` 的当前累计值，也不影响表达式查询、告警、通知计划与 SLO 的计算。
+- 返回 `{"series":[...]}`：序列按完整标签规范排序，每条含 `name`、`type`、`labels` 与 `points`；点按窗口起点升序，`timestamp` 为窗口起点（统一 UTC RFC3339Nano）。counter 点的 `value` 为窗口内增量之和；gauge 取窗口内时间最晚的观测（同一时刻取提交顺序靠后者）；histogram 点含窗口内 `count`、`sum` 与按该序列固定边界计算的累计 `buckets`。空窗口不生成点，无点的序列不返回；没有结果时返回 `200 {"series":[]}`。
+- 聚合结果为非有限数时整次返回 `422 {"error":{"code":"invalid_metric_range_data"}}`，不返回部分结果。
+- 参数缺失、重复、未知，标识符、时间区间或 `step` 非法，以及窗口过多，统一返回 `400 {"error":{"code":"invalid_metric_range"}}`。仅支持 GET；其他方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: GET`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离。
 
 ### 表达式查询 `GET /api/v1/query`
 
@@ -301,7 +317,7 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标写入/查询与时序查询、表达式查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。

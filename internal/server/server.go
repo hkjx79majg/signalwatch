@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Version is the baseline release identifier.
@@ -47,6 +48,11 @@ type series struct {
 	bucketCounts []int64   // cumulative counts per bound, len == len(bucketBounds)
 	count        int64
 	sum          float64
+
+	// history holds every accepted sample in commit order, oldest first.
+	// Entries older than the retention window are filtered out at query
+	// time; they never affect the current values above.
+	history []samplePoint
 }
 
 type metricStore struct {
@@ -84,6 +90,10 @@ type metricStore struct {
 	// Spans keyed by tenant-unique "trace_id\x00span_id"; same lock so span
 	// commits and trace reads share the logs snapshot they join against.
 	spans map[string]*span
+
+	// metricSeq is the commit sequence assigned to every accepted metric
+	// sample; it breaks gauge ties between samples sharing one timestamp.
+	metricSeq int64
 }
 
 func newMetricStore() *metricStore {
@@ -101,12 +111,13 @@ func newMetricStore() *metricStore {
 
 // validatedSample is a sample that passed all format and value checks.
 type validatedSample struct {
-	key     string
-	name    string
-	typ     string
-	labels  map[string]string
-	value   float64
-	buckets []float64 // non-nil for histograms
+	key       string
+	name      string
+	typ       string
+	labels    map[string]string
+	value     float64
+	buckets   []float64 // non-nil for histograms
+	timestamp time.Time // explicit, or the request's receive instant
 }
 
 // checkAndApply validates the batch against the current state (and against
@@ -168,6 +179,12 @@ func (s *metricStore) checkAndApply(batch []validatedSample) bool {
 				}
 			}
 		}
+		s.metricSeq++
+		cur.history = append(cur.history, samplePoint{
+			timestamp: sm.timestamp,
+			value:     sm.value,
+			seq:       s.metricSeq,
+		})
 	}
 	return true
 }
@@ -347,6 +364,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerNotificationRouteHandlers(mux)
 	registerSLOHandlers(mux)
 	registerQueryHandler(mux)
+	registerMetricRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
 
@@ -354,6 +372,10 @@ func newHandler(registry *tenantRegistry) http.Handler {
 }
 
 func handleMetricsPost(w http.ResponseWriter, r *http.Request) {
+	// receivedAt anchors both the default timestamp of samples that omit
+	// one and the acceptance window for explicit timestamps; every sample
+	// in the request shares this single instant.
+	receivedAt := time.Now()
 	store := tenantStore(r)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
@@ -367,9 +389,9 @@ func handleMetricsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	batch, ok := decodeMetricsBatch(body)
-	if !ok {
-		writeAPIError(w, "invalid_metrics", http.StatusBadRequest)
+	batch, errCode := decodeMetricsBatch(body, receivedAt)
+	if errCode != "" {
+		writeAPIError(w, errCode, http.StatusBadRequest)
 		return
 	}
 
@@ -388,74 +410,91 @@ type metricsEnvelope struct {
 }
 
 type rawSample struct {
-	Name    *string            `json:"name"`
-	Type    *string            `json:"type"`
-	Labels  *map[string]string `json:"labels"`
-	Value   *float64           `json:"value"`
-	Buckets *[]float64         `json:"buckets"`
+	Name      *string            `json:"name"`
+	Type      *string            `json:"type"`
+	Labels    *map[string]string `json:"labels"`
+	Value     *float64           `json:"value"`
+	Buckets   *[]float64         `json:"buckets"`
+	Timestamp *string            `json:"timestamp"`
 }
 
 // decodeMetricsBatch performs every format and value check. It never returns a
-// partially validated batch.
-func decodeMetricsBatch(body []byte) ([]validatedSample, bool) {
+// partially validated batch. The result code is "" on success,
+// "invalid_metrics" for any format or value violation, or
+// "metric_timestamp_out_of_range" when a timestamp falls outside the
+// acceptance window around receivedAt.
+func decodeMetricsBatch(body []byte, receivedAt time.Time) ([]validatedSample, string) {
 	var env metricsEnvelope
 	if !strictDecode(body, &env) || env.Samples == nil || len(*env.Samples) == 0 {
-		return nil, false
+		return nil, "invalid_metrics"
 	}
 
 	batch := make([]validatedSample, 0, len(*env.Samples))
 	for _, raw := range *env.Samples {
 		var sm rawSample
 		if !strictDecode(raw, &sm) {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		if sm.Name == nil || sm.Type == nil || sm.Labels == nil || sm.Value == nil {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		name, typ := *sm.Name, *sm.Type
 		if !identPattern.MatchString(name) {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		if typ != "counter" && typ != "gauge" && typ != "histogram" {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 		labels := *sm.Labels
 		if labels == nil {
-			return nil, false // explicit null labels
+			return nil, "invalid_metrics" // explicit null labels
 		}
 		for k := range labels {
 			if !identPattern.MatchString(k) {
-				return nil, false
+				return nil, "invalid_metrics"
 			}
 		}
 		value := *sm.Value
 		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, false // encoding/json already rejects NaN/Inf tokens
+			return nil, "invalid_metrics" // encoding/json already rejects NaN/Inf tokens
 		}
 		if typ == "counter" && value < 0 {
-			return nil, false
+			return nil, "invalid_metrics"
 		}
 
 		var buckets []float64
 		if typ == "histogram" {
 			if sm.Buckets == nil || !validBuckets(*sm.Buckets) {
-				return nil, false
+				return nil, "invalid_metrics"
 			}
 			buckets = append([]float64(nil), (*sm.Buckets)...)
 		} else if sm.Buckets != nil {
-			return nil, false // buckets only valid on histograms
+			return nil, "invalid_metrics" // buckets only valid on histograms
+		}
+
+		timestamp := receivedAt
+		if sm.Timestamp != nil {
+			parsed, err := time.Parse(time.RFC3339Nano, *sm.Timestamp)
+			if err != nil {
+				return nil, "invalid_metrics"
+			}
+			timestamp = parsed
+		}
+		if timestamp.Before(receivedAt.Add(-metricRetention)) || timestamp.After(receivedAt.Add(metricMaxFutureSkew)) {
+			return nil, "metric_timestamp_out_of_range"
 		}
 
 		batch = append(batch, validatedSample{
-			key:     seriesKey(name, labels),
-			name:    name,
-			typ:     typ,
-			labels:  copyLabels(labels),
-			value:   value,
-			buckets: buckets,
+			key:       seriesKey(name, labels),
+			name:      name,
+			typ:       typ,
+			labels:    copyLabels(labels),
+			value:     value,
+			buckets:   buckets,
+			timestamp: timestamp,
 		})
 	}
-	return batch, true
+	return batch, ""
 }
 
 func validBuckets(buckets []float64) bool {
