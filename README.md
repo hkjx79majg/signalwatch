@@ -175,6 +175,43 @@ GET /api/v1/metrics?name=hits&label.route=/a
 - `deliveries` 按 `alert_id` 字典序排列，`unrouted_alert_ids` 按字典序排列；无结果时二者均为空数组。
 - 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
 
+## SLO 与错误预算接口
+
+SLO 定义只保存在进程内存中，重启即清空。SLO `id` 沿用指标名约束（`[a-zA-Z_][a-zA-Z0-9_]*`，取自路径）。创建定义时不要求被引用的指标已存在。
+
+### 管理定义
+
+- `PUT /api/v1/slos/{id}`：创建或原子替换定义。新建返回 `201`，替换返回 `200`，响应体均为定义本身（含路径 `id`）。
+- `GET /api/v1/slos/{id}`：查看定义，返回 `200` 与定义；不存在返回 `404 {"error":{"code":"slo_not_found"}}`。
+- `DELETE /api/v1/slos/{id}`：删除定义，返回 `204`；不存在返回 `404 slo_not_found`。
+- `GET /api/v1/slos`：返回 `{"slos":[...]}`，按 `id` 字典序排列；无定义时为空数组。
+
+定义只接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须是单个对象，字段必须恰好完整：
+
+```json
+{"objective":0.99,
+ "good":{"metric":"http_requests_ok","labels":{"route":"/a"}},
+ "total":{"metric":"http_requests_total","labels":{"route":"/a"}},
+ "comment":"核心接口可用性"}
+```
+
+- `objective` 为 `0` 至 `1` 之间的有限数（含端点）。
+- `good`、`total` 各含合法的 `metric`（标识符约束）与 `labels`（字符串对象，标签键须为合法标识符，允许空对象）；选择器匹配同名且**包含全部指定标签**的序列。
+- `comment` 必须是字符串（允许空字符串）。
+- 正文不是对象、多段 JSON、字段缺失或多出、类型错误、非法标识符、`null` 标签或非法 `objective` 等，一律返回 `400 {"error":{"code":"invalid_slo"}}`，失败的替换不改变旧定义。
+- 集合端点仅支持 GET（`405`，`Allow: GET`）；单项端点支持 GET、PUT、DELETE（`405`，`Allow: GET, PUT, DELETE`）。
+
+### SLO 状态 `GET /api/v1/slo-status`
+
+使用指标与全部 SLO 定义的**同一一致快照**评估，按 `id` 排序返回 `{"slos":[...]}`。每个选择器对同名且包含指定标签的 **counter** 当前值求和；gauge 与 histogram 被忽略，仅匹配到 gauge/histogram 视为无可用 counter。每项含 `id`、`state`、`good_events`、`total_events`、`compliance`、`error_budget_total`、`error_budget_remaining`、`error_budget_remaining_ratio`：
+
+- 任一侧无可用 counter，或 `total_events` 之和为 `0`：`state` 为 `no_data`。
+- 任一侧聚合结果非有限（`NaN`/`Inf`），或 `good_events` 大于 `total_events`：`state` 为 `invalid_data`。
+- 以上两种情况下六个数值字段均为 `null`。
+- 其余情况下：`compliance = good_events/total_events`；`error_budget_total = total_events*(1-objective)`；`error_budget_remaining = 预算总量-(total_events-good_events)`（允许为负）；`error_budget_remaining_ratio = 剩余量/预算总量`（允许为负）。`compliance` 不低于 `objective` 时 `state` 为 `met`，否则为 `breached`。
+- 当 `objective` 为 `1` 且错误数为 `0` 时预算总量为 `0`，剩余比例无定义，对应字段回显为 `null`。
+- 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
+
 ## 验证
 
 ```bash
