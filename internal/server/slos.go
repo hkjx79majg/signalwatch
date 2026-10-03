@@ -220,14 +220,14 @@ func (s *metricStore) evalSLOStatus() []sloStatusOutput {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
+func registerSLOHandlers(mux *http.ServeMux) {
 	mux.HandleFunc(slosPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		defs := store.snapshotSLOs()
+		defs := tenantStore(r).snapshotSLOs()
 		body := make([]sloJSON, 0, len(defs))
 		for _, d := range defs {
 			body = append(body, sloWireJSON(d))
@@ -236,6 +236,7 @@ func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
 	})
 
 	mux.HandleFunc(slosPrefix, func(w http.ResponseWriter, r *http.Request) {
+		store := tenantStore(r)
 		id := strings.TrimPrefix(r.URL.Path, slosPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -274,7 +275,7 @@ func registerSLOHandlers(mux *http.ServeMux, store *metricStore) {
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"slos": store.evalSLOStatus()})
+		writeJSON(w, http.StatusOK, map[string]any{"slos": tenantStore(r).evalSLOStatus()})
 	})
 }
 

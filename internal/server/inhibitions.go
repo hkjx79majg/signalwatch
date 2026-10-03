@@ -147,14 +147,14 @@ func (s *metricStore) snapshotInhibitRules() []*inhibitRule {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerInhibitHandlers(mux *http.ServeMux, store *metricStore) {
+func registerInhibitHandlers(mux *http.ServeMux) {
 	mux.HandleFunc(inhibitRulesPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		rules := store.snapshotInhibitRules()
+		rules := tenantStore(r).snapshotInhibitRules()
 		body := make([]inhibitRuleJSON, 0, len(rules))
 		for _, rule := range rules {
 			body = append(body, inhibitWireJSON(rule))
@@ -163,6 +163,7 @@ func registerInhibitHandlers(mux *http.ServeMux, store *metricStore) {
 	})
 
 	mux.HandleFunc(inhibitRulesPrefix, func(w http.ResponseWriter, r *http.Request) {
+		store := tenantStore(r)
 		id := strings.TrimPrefix(r.URL.Path, inhibitRulesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:

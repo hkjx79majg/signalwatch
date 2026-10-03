@@ -210,6 +210,17 @@ SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符�
 - 其余情况：`compliance = good_events/total_events`，`error_budget_total = total_events*(1-objective)`，`error_budget_remaining = error_budget_total-(total_events-good_events)`，`error_budget_remaining_ratio = error_budget_remaining/error_budget_total`；后两项允许为负。`compliance` 不低于 `objective` 时 `state` 为 `met`，否则为 `breached`。
 - 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
 
+## 租户隔离
+
+所有已注册的 `/api/v1` 端点（指标、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+
+- 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
+- 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
+- 每个租户拥有独立的指标序列、告警规则、静默、抑制规则、通知路由与 SLO：同名指标/标签集与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
+- 不同租户使用各自独立的锁与存储，并发访问不同租户既不会串读，也不会互相阻塞；全部状态仍只存于进程内存，重启统一清空。
+- 首次访问尚无数据的合法租户时，集合与计算端点按基线空状态响应（空数组），单项查询/删除沿用对应资源既有的 `not_found` 错误。
+- `GET /healthz` 不参与租户隔离并忽略该头；未知路径保持基线 404 行为。
+
 ## 验证
 
 ```bash

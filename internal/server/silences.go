@@ -164,7 +164,7 @@ func (s *metricStore) snapshotSilences() []*silence {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
+func registerSilenceHandlers(mux *http.ServeMux) {
 	mux.HandleFunc(silencesPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -172,7 +172,7 @@ func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
 			return
 		}
 		now := time.Now()
-		silences := store.snapshotSilences()
+		silences := tenantStore(r).snapshotSilences()
 		body := make([]silenceJSON, 0, len(silences))
 		for _, sil := range silences {
 			body = append(body, silenceWireJSON(sil, now))
@@ -181,6 +181,7 @@ func registerSilenceHandlers(mux *http.ServeMux, store *metricStore) {
 	})
 
 	mux.HandleFunc(silencesPrefix, func(w http.ResponseWriter, r *http.Request) {
+		store := tenantStore(r)
 		id := strings.TrimPrefix(r.URL.Path, silencesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:

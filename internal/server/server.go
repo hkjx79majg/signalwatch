@@ -299,8 +299,11 @@ func equalBuckets(a, b []float64) bool {
 
 // Handler returns the HTTP surface served by SignalWatch.
 func Handler() http.Handler {
+	return newHandler(newTenantRegistry())
+}
+
+func newHandler(registry *tenantRegistry) http.Handler {
 	mux := http.NewServeMux()
-	store := newMetricStore()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -315,25 +318,26 @@ func Handler() http.Handler {
 	mux.HandleFunc(metricsPath, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			handleMetricsGet(w, r, store)
+			handleMetricsGet(w, r)
 		case http.MethodPost:
-			handleMetricsPost(w, r, store)
+			handleMetricsPost(w, r)
 		default:
 			w.Header().Set("Allow", "GET, POST")
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 		}
 	})
 
-	registerAlertHandlers(mux, store)
-	registerSilenceHandlers(mux, store)
-	registerInhibitHandlers(mux, store)
-	registerNotificationRouteHandlers(mux, store)
-	registerSLOHandlers(mux, store)
+	registerAlertHandlers(mux)
+	registerSilenceHandlers(mux)
+	registerInhibitHandlers(mux)
+	registerNotificationRouteHandlers(mux)
+	registerSLOHandlers(mux)
 
-	return mux
+	return withTenants(mux, registry)
 }
 
-func handleMetricsPost(w http.ResponseWriter, r *http.Request, store *metricStore) {
+func handleMetricsPost(w http.ResponseWriter, r *http.Request) {
+	store := tenantStore(r)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeAPIError(w, "unsupported_media_type", http.StatusUnsupportedMediaType)
@@ -466,7 +470,8 @@ func strictDecode(data []byte, target any) bool {
 	return true
 }
 
-func handleMetricsGet(w http.ResponseWriter, r *http.Request, store *metricStore) {
+func handleMetricsGet(w http.ResponseWriter, r *http.Request) {
+	store := tenantStore(r)
 	values, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		writeAPIError(w, "invalid_query", http.StatusBadRequest)

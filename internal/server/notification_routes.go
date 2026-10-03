@@ -145,14 +145,14 @@ func (s *metricStore) snapshotNotificationRoutesLocked() []*notificationRoute {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
+func registerNotificationRouteHandlers(mux *http.ServeMux) {
 	mux.HandleFunc(notificationRoutesPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		routes := store.snapshotNotificationRoutes()
+		routes := tenantStore(r).snapshotNotificationRoutes()
 		body := make([]notificationRouteJSON, 0, len(routes))
 		for _, route := range routes {
 			body = append(body, notificationRouteWireJSON(route))
@@ -161,6 +161,7 @@ func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
 	})
 
 	mux.HandleFunc(notificationRoutesPrefix, func(w http.ResponseWriter, r *http.Request) {
+		store := tenantStore(r)
 		id := strings.TrimPrefix(r.URL.Path, notificationRoutesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -199,7 +200,7 @@ func registerNotificationRouteHandlers(mux *http.ServeMux, store *metricStore) {
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		deliveries, unrouted := store.notificationPlan()
+		deliveries, unrouted := tenantStore(r).notificationPlan()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"deliveries":         deliveries,
 			"unrouted_alert_ids": unrouted,

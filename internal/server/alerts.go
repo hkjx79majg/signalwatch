@@ -400,13 +400,14 @@ func compareHolds(operator string, value, threshold float64) bool {
 
 // ---- HTTP handlers ---------------------------------------------------------
 
-func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
+func registerAlertHandlers(mux *http.ServeMux) {
 	mux.HandleFunc(alertRulesPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		store := tenantStore(r)
 		rules := store.snapshotRules()
 		body := make([]any, 0, len(rules))
 		for _, rule := range rules {
@@ -416,6 +417,7 @@ func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
 	})
 
 	mux.HandleFunc(alertRulesPrefix, func(w http.ResponseWriter, r *http.Request) {
+		store := tenantStore(r)
 		id := strings.TrimPrefix(r.URL.Path, alertRulesPrefix)
 		switch r.Method {
 		case http.MethodGet, http.MethodDelete:
@@ -454,7 +456,7 @@ func registerAlertHandlers(mux *http.ServeMux, store *metricStore) {
 			writeAPIError(w, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"alerts": store.evalAlerts()})
+		writeJSON(w, http.StatusOK, map[string]any{"alerts": tenantStore(r).evalAlerts()})
 	})
 }
 
