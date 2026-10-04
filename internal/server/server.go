@@ -98,6 +98,13 @@ type metricStore struct {
 	// Discovery target snapshot; same lock so reloads swap one immutable
 	// snapshot pointer and queries always read a consistent generation.
 	discovery *discoverySnapshot
+
+	// Counter baselines captured during active scrapes, keyed by the
+	// discovery generation and then by series key. Each value is the last
+	// raw counter value observed under that generation; a scrape pinned to
+	// an older generation keeps reading and updating that generation's
+	// baseline, so a concurrent reload cannot change its deltas.
+	scrapeBaselines map[int64]map[string]float64
 }
 
 func newMetricStore() *metricStore {
@@ -112,6 +119,7 @@ func newMetricStore() *metricStore {
 		spans:              make(map[string]*span),
 		sampling:           defaultSamplingPolicy(),
 		discovery:          emptyDiscoverySnapshot(),
+		scrapeBaselines:    make(map[int64]map[string]float64),
 	}
 }
 

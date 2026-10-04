@@ -356,7 +356,7 @@ PUT /api/v1/sampling-policy        {"log_rate":0.5,"trace_rate":0.25}
 
 ## 服务发现目标接口
 
-静态目标快照只存于内存，重启后恢复为 `generation` 为 0、`targets` 为空数组。服务不会主动访问任何目标地址。
+静态目标快照只存于内存，重启后恢复为 `generation` 为 0、`targets` 为空数组。查询与重载不会访问目标地址；主动抓取由独立的抓取端点触发。
 
 ### 重载 `POST /api/v1/discovery-targets/reload`
 
@@ -379,9 +379,27 @@ Content-Type: application/json
 - 不接受任何查询参数，携带查询参数返回 `400 {"error":{"code":"invalid_discovery_query"}}`。
 - GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
 
+### 主动抓取 `POST /api/v1/discovery-targets/scrape`
+
+```
+POST /api/v1/discovery-targets/scrape
+Content-Type: application/json
+
+{"target_ids":["web_1"]}
+```
+
+- 正文必须是单个 JSON 对象且恰好含 `target_ids` 数组：各项须符合标识符规则且不重复。非空数组抓取指定目标；空数组抓取快照内全部 `enabled` 目标。正文非法（字段缺失或多出、非数组、编号非法或重复等）返回 `400 {"error":{"code":"invalid_discovery_scrape"}}`；非 `application/json` 返回 `415 unsupported_media_type`。
+- 请求开始时固定本次的 `generation` 与目标快照：随后并发的重载不影响本次选择、URL、静态标签、响应 `generation` 与 counter 基线。非空选择先按 `id` 排序，再逐项校验；编号不存在返回 `404 {"error":{"code":"discovery_target_not_found"}}`，选择到 `disabled` 目标返回 `409 {"error":{"code":"discovery_target_disabled"}}`。
+- 服务用 `GET` 访问目标 URL，整体五秒超时且不跟随重定向；仅接收 HTTP 200 的 Prometheus 文本。样本写作 `metric{label="value"} number` 或无标签的 `metric number`，类型由该指标名最近一条 `# TYPE` 声明确定，且必须为 `counter` 或 `gauge`。未知类型、重复标签、非法指标名或标签键、非有限数值、语法残缺或存在多余 token（如显式时间戳）均使该目标记为 `invalid_exposition`，目标不写入任何指标。
+- 标签合并目标静态标签与样本标签：同名异值，或任一来源使用保留标签 `target_id`，记为 `label_conflict`；否则补入 `target_id=<目标编号>`。同名同值的合并视为一致。
+- `gauge` 覆盖当前值；`counter` 按累计读数处理——在本次固定 `generation` 下首次写入全值，之后读数未下降时写入增量，读数下降时按计数器重置写入新的全值。基线只随整批提交成功更新；若批内任一序列与既有序列类型冲突，记为 `metric_conflict`，指标与基线均不变。
+- 目标连接失败或超时记 `target_unreachable`；收到响应但状态码非 200（含未跟随的重定向）记 `target_http_error`。单目标失败不回滚、不影响其他目标。
+- 成功返回 `200 {"generation":N,"results":[...]}`，`results` 按 `id` 字典序排列；每项含 `id`、`status`、`accepted`，成功为 `{"id":"web_1","status":"ok","accepted":3}`，失败项 `accepted` 为 0 并含对应 `code`（如 `{"id":"web_1","status":"error","accepted":0,"code":"target_unreachable"}`）。没有可抓取的 `enabled` 目标时 `results` 为空数组。目标按 `id` 顺序依次提交。
+- POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，`invalid_tenant` 优先于媒体类型、正文与编号校验；其他入口行为不变。
+
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载与查询）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与主动抓取）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。

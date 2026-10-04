@@ -14,6 +14,7 @@ import (
 const (
 	discoveryTargetsPath       = "/api/v1/discovery-targets"
 	discoveryTargetsReloadPath = "/api/v1/discovery-targets/reload"
+	discoveryTargetsScrapePath = "/api/v1/discovery-targets/scrape"
 
 	maxDiscoveryTargets = 1000
 )
@@ -243,4 +244,6 @@ func registerDiscoveryTargetHandlers(mux *http.ServeMux) {
 		snap := tenantStore(r).reloadDiscoveryTargets(targets)
 		writeJSON(w, http.StatusOK, discoverySnapshotWireJSON(snap))
 	})
+
+	mux.HandleFunc(discoveryTargetsScrapePath, handleDiscoveryScrape)
 }
