@@ -414,14 +414,6 @@ func TestTraceMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestTraceCollectionPathNotFound(t *testing.T) {
-	h := Handler()
-	rec := getTrace(t, h, "/api/v1/traces")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("GET /api/v1/traces: status = %d, want 404", rec.Code)
-	}
-}
-
 func TestSpansTenantIsolation(t *testing.T) {
 	h := Handler()
 	if rec := postSpanBatch(t, h, []string{rootSpan(`{}`)}, "team-a"); rec.Code != http.StatusAccepted {

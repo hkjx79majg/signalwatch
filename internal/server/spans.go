@@ -35,6 +35,7 @@ type span struct {
 	endTime      time.Time
 	status       string
 	attributes   map[string]string
+	seq          int64 // commit sequence, assigned when first stored
 }
 
 // sameContent reports whether two spans with the same (trace_id, span_id)
@@ -103,6 +104,8 @@ func (s *metricStore) checkAndApplySpans(batch []*span) (accepted, replayed, sam
 			sampledOutN++
 			continue
 		}
+		s.spanSeq++
+		sp.seq = s.spanSeq
 		s.spans[key] = sp
 		accepted++
 	}
@@ -322,12 +325,10 @@ func registerSpanHandlers(mux *http.ServeMux) {
 		handleSpansPost(w, r)
 	})
 
-	// The trace collection has no list endpoint; answer the exact collection
-	// path with the baseline 404 instead of letting the subtree pattern issue
-	// its trailing-slash redirect.
-	mux.HandleFunc(tracesCollectionPath, func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
+	// The trace collection path serves the trace search endpoint; the exact
+	// path is registered here so it never falls through to the subtree
+	// pattern's trailing-slash redirect.
+	mux.HandleFunc(tracesCollectionPath, handleTracesGet)
 
 	mux.HandleFunc(tracesPrefix, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

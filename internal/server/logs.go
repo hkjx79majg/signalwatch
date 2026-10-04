@@ -364,21 +364,8 @@ func encodeCursor(c *logCursor) string {
 // decodeCursor parses and validates a cursor token. The boolean is false for
 // any malformed, tampered or otherwise unusable token.
 func decodeCursor(token string) (*logCursor, bool) {
-	payloadPart, macPart, ok := strings.Cut(token, ".")
+	payload, _, ok := parseCursorToken(token)
 	if !ok {
-		return nil, false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil {
-		return nil, false
-	}
-	wantMAC, err := base64.RawURLEncoding.DecodeString(macPart)
-	if err != nil {
-		return nil, false
-	}
-	mac := hmac.New(sha256.New, cursorKey)
-	mac.Write(payload)
-	if !hmac.Equal(mac.Sum(nil), wantMAC) {
 		return nil, false
 	}
 	var c logCursor
@@ -416,6 +403,30 @@ func decodeCursor(token string) (*logCursor, bool) {
 		return nil, false
 	}
 	return &c, true
+}
+
+// parseCursorToken splits a "payload.mac" cursor token, base64-decodes both
+// halves and checks the HMAC. It is shared by the log and trace search
+// cursors, which use the same per-process key and envelope.
+func parseCursorToken(token string) (payload, wantMAC []byte, ok bool) {
+	payloadPart, macPart, ok := strings.Cut(token, ".")
+	if !ok {
+		return nil, nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return nil, nil, false
+	}
+	wantMAC, err = base64.RawURLEncoding.DecodeString(macPart)
+	if err != nil {
+		return nil, nil, false
+	}
+	mac := hmac.New(sha256.New, cursorKey)
+	mac.Write(payload)
+	if !hmac.Equal(mac.Sum(nil), wantMAC) {
+		return nil, nil, false
+	}
+	return payload, wantMAC, true
 }
 
 // ---- HTTP handlers ---------------------------------------------------------

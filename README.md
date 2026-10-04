@@ -331,6 +331,24 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 - 路径编号非法返回 `400 {"error":{"code":"invalid_trace_id"}}`；该端点不接受任何查询参数，非法查询字符串返回 `400 {"error":{"code":"invalid_trace_query"}}`。
 - GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
 
+### 检索 `GET /api/v1/traces`
+
+首次请求必须各携带一次 `start`、`end`，可各携带一次 `service`、`name`、`status`、`limit`：
+
+```
+GET /api/v1/traces?start=2026-01-02T00:00:00Z&end=2026-01-03T00:00:00Z&service=web&status=error&limit=50
+```
+
+- `start`、`end` 为带时区的 RFC3339Nano 且 `start < end`；链路时间取该链路已存跨度的最早 `start_time`，落入 `[start, end)` 才入选。
+- `service`、`name` 为非空字符串，区分大小写精确匹配；`status` 仅限 `unset`、`ok`、`error`；多个跨度过滤条件须由同一个跨度同时满足（而非分散在同一链路的不同跨度上）。
+- `limit` 默认 100，范围 1 至 200。
+- 返回 `{"traces":[...],"next_cursor":...}`；每个摘要只含 `trace_id`、`start_time`、`end_time`、`span_count`、`services`、`status`：起止时间分别取最早开始与最晚结束并统一为 UTC RFC3339Nano，`span_count` 为已存跨度数，`services` 去重后按字典序排列，`status` 在有 `error` 跨度时为 `error`，否则有 `ok` 时为 `ok`，否则为 `unset`。
+- 摘要按 `start_time` 降序、同一瞬间按 `trace_id` 字典序排列；空结果返回空数组与 `null` 游标。
+- 结果超过 `limit` 时返回不透明游标；后续请求只能携带 `cursor`，游标固定首次条件、页大小及首次请求开始时的摘要快照，此后写入的数据不会混入后续页也不会造成重复；末页游标为 `null`。
+- 首次请求参数缺失、重复、未知或取值非法时返回 `400 {"error":{"code":"invalid_trace_query"}}`；游标非法、被篡改、与其他参数混用或跨租户使用时返回 `400 {"error":{"code":"invalid_trace_cursor"}}`。
+- 检索只汇总当前租户的已存跨度：被采样丢弃的跨度不留任何痕迹，只有日志的 `trace_id` 不产生结果。
+- GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
+
 ## 采样策略接口
 
 每个租户独立的确定性摄入采样策略只保存在进程内存中，新租户与重启后的默认值均为 `{"log_rate":1,"trace_rate":1}`。

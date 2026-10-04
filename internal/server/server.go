@@ -89,7 +89,9 @@ type metricStore struct {
 
 	// Spans keyed by tenant-unique "trace_id\x00span_id"; same lock so span
 	// commits and trace reads share the logs snapshot they join against.
-	spans map[string]*span
+	// spanSeq is the commit sequence that anchors paginated trace searches.
+	spans   map[string]*span
+	spanSeq int64
 
 	// Deterministic ingest sampling policy; same lock so a policy swap is
 	// atomic with respect to the log/span commits it governs.
