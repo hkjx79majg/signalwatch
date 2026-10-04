@@ -414,11 +414,12 @@ func TestTraceMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestTraceCollectionPathNotFound(t *testing.T) {
+func TestTraceCollectionRequiresWindow(t *testing.T) {
 	h := Handler()
 	rec := getTrace(t, h, "/api/v1/traces")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("GET /api/v1/traces: status = %d, want 404", rec.Code)
+	if rec.Code != http.StatusBadRequest || errorCode(t, rec) != "invalid_trace_query" {
+		t.Fatalf("GET /api/v1/traces: status = %d code = %q, want 400 invalid_trace_query",
+			rec.Code, errorCode(t, rec))
 	}
 }
 
