@@ -331,6 +331,32 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 - 路径编号非法返回 `400 {"error":{"code":"invalid_trace_id"}}`；该端点不接受任何查询参数，非法查询字符串返回 `400 {"error":{"code":"invalid_trace_query"}}`。
 - GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
 
+## 摄入采样策略接口
+
+采样策略只保存在进程内存中，按租户独立；新租户与重启后的默认值均为 `1`（全部保留）。
+
+### 读取与替换 `GET`/`PUT /api/v1/sampling-policy`
+
+```json
+{"log_rate":1,"trace_rate":1}
+```
+
+- `GET` 返回当前租户策略；不接受任何查询参数，携带查询参数返回 `400 {"error":{"code":"invalid_sampling_query"}}`。
+- `PUT` 原子替换当前租户策略并回显新策略（`200`）。仅接受 `Content-Type: application/json`，否则返回 `415 {"error":{"code":"unsupported_media_type"}}`。
+- 两个字段均必须存在，且为 0 到 1 之间（含端点）的有限数；字段缺失、多余、类型错误、非有限数或越界统一返回 `400 {"error":{"code":"invalid_sampling_policy"}}`，失败的替换不改变旧策略。
+- GET、PUT 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET, PUT`。
+- `invalid_tenant` 仍优先于媒体类型、正文与查询校验。
+
+### 确定性摄入采样
+
+策略只作用于 `POST /api/v1/logs` 与 `POST /api/v1/spans`，去留是身份与比例的纯函数，与批次拆分、到达顺序、重放无关：
+
+- 不带 `trace_id` 的日志按日志 `id` 与 `log_rate` 决定；带 `trace_id` 的日志与全部跨度按 `trace_id` 与 `trace_rate` 决定，因此同一链路的日志与跨度始终同去同留。
+- 格式校验、批内重复识别以及与已保留记录的重放/冲突判定仍先于采样：任一非法项或冲突仍使整批按既有错误码（`invalid_logs`/`invalid_spans`/`log_conflict`/`span_conflict`）失败且不改变状态。只有通过全部校验、尚未保留的合法项才参与采样。
+- 丢弃项不占用 id、容量、提交序号或分页快照，也不出现在日志检索与链路详情中；保留项沿用既有提交顺序与原子性。
+- 成功响应仍为 `202`。两个比例均为 1 时响应与既有行为完全一致（`{"accepted":N,"replayed":M}`）；任一比例小于 1 时增加 `sampled_out`，三者之和等于请求数组长度。
+- 已保留身份即使后来降低比例，仍按既有内容执行 replay 或 conflict；策略更新不追溯删除现有数据。此前被丢弃且从未保留的身份，可在提高比例后重新提交并按新策略判断。
+
 ## 服务发现目标接口
 
 静态目标快照只存于内存，重启后恢复为 `generation` 为 0、`targets` 为空数组。服务不会主动访问任何目标地址。
@@ -358,7 +384,7 @@ Content-Type: application/json
 
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载与查询）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、摄入采样策略、服务发现目标的重载与查询）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。

@@ -62,8 +62,12 @@ func (e *logEntry) sameContent(other *logEntry) bool {
 // itself) and then commits it in array order. A false result signals a
 // content conflict on a repeated id; in that case no state is mutated.
 // Replays — repeats of an id with identical content — are counted but do not
-// mutate state or refresh eviction order.
-func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed int, ok bool) {
+// mutate state or refresh eviction order. Sampling runs only after every
+// format, duplicate and conflict check passes: a not-yet-retained legal entry
+// is kept or dropped deterministically by log id, or by trace id under
+// trace_rate when it carries one. Dropped entries consume no id, capacity or
+// commit sequence.
+func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed, sampledOut int, samplingActive, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -73,21 +77,34 @@ func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed i
 	for _, e := range batch {
 		if prev, dup := seen[e.id]; dup {
 			if !prev.sameContent(e) {
-				return 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			continue
 		}
 		if existing, committed := s.logs[e.id]; committed && !existing.sameContent(e) {
-			return 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		seen[e.id] = e
 	}
+
+	policy := s.policyLocked()
+	samplingActive = policy.logRate < 1 || policy.traceRate < 1
 
 	// Second pass: commit in array order, then evict the oldest ids until
 	// the tenant is back within the retention bound.
 	for _, e := range batch {
 		if _, exists := s.logs[e.id]; exists {
 			replayed++
+			continue
+		}
+		// An already retained identity always replays; only fresh identities
+		// are sampled. A trace id groups the log with the trace's spans.
+		rate, identity := policy.logRate, e.id
+		if e.traceID != "" {
+			rate, identity = policy.traceRate, e.traceID
+		}
+		if !sampleIn(identity, rate) {
+			sampledOut++
 			continue
 		}
 		s.logSeq++
@@ -103,7 +120,7 @@ func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed i
 		}
 		s.logOrder = append([]string(nil), s.logOrder[excess:]...)
 	}
-	return accepted, replayed, true
+	return accepted, replayed, sampledOut, samplingActive, true
 }
 
 // logFilter is the immutable condition set of a log query. A nil entry in
@@ -438,13 +455,13 @@ func handleLogsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, replayed, applied := store.checkAndApplyLogs(batch)
+	accepted, replayed, sampledOut, samplingActive, applied := store.checkAndApplyLogs(batch)
 	if !applied {
 		writeAPIError(w, "log_conflict", http.StatusConflict)
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted, "replayed": replayed})
+	writeIngestResponse(w, accepted, replayed, sampledOut, samplingActive)
 }
 
 func handleLogsGet(w http.ResponseWriter, r *http.Request) {

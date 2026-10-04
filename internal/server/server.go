@@ -94,6 +94,10 @@ type metricStore struct {
 	// Discovery target snapshot; same lock so reloads swap one immutable
 	// snapshot pointer and queries always read a consistent generation.
 	discovery *discoverySnapshot
+
+	// Per-tenant ingestion sampling policy. nil means the keep-everything
+	// default; same lock so policy reads are consistent with commits.
+	policy *samplingPolicy
 }
 
 func newMetricStore() *metricStore {
@@ -365,6 +369,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
 	registerDiscoveryTargetHandlers(mux)
+	registerSamplingPolicyHandler(mux)
 
 	return withTenants(mux, registry)
 }
