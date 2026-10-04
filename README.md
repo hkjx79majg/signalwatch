@@ -277,7 +277,7 @@ SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符�
 
 - `id` 为 1 至 128 个可打印 ASCII 字符；`timestamp` 为带时区的 RFC3339Nano；`level` 仅限 `debug`、`info`、`warn`、`error`；`message` 为字符串；`labels` 为字符串对象，键沿用标识符约束；`trace_id` 可选，为 32 位小写十六进制。
 - 结构、未知字段或取值非法时整批返回 `400 {"error":{"code":"invalid_logs"}}`，不改变任何状态。
-- 同一租户内 `id` 唯一：已有 `id` 与新记录的时间瞬间和其余内容相同视为重放，否则整批返回 `409 {"error":{"code":"log_conflict"}}`；批内重复 `id` 同样判定。成功返回 `202` 及 `{"accepted":N,"replayed":M}`。
+- 同一租户内 `id` 唯一：已有 `id` 与新记录的时间瞬间和其余内容相同视为重放，否则整批返回 `409 {"error":{"code":"log_conflict"}}`；批内重复 `id` 同样判定。成功返回 `202` 及 `{"accepted":N,"replayed":M}`；采样策略任一比例小于 1 时响应另含 `sampled_out`（见采样策略接口）。
 - 每个租户按提交顺序保留最近 10000 个不同 `id`，提交后按数组顺序淘汰最早项；重放不刷新顺序，被淘汰 `id` 可再次写入。
 
 ### 检索 `GET /api/v1/logs`
@@ -316,7 +316,7 @@ GET /api/v1/logs?level=error&label.app=web&limit=50
 - `trace_id` 为 32 位小写十六进制；`span_id` 为 16 位小写十六进制；`parent_span_id` 为 `null` 或同格式字符串，且不能等于自身（引用尚不存在的父跨度合法）。
 - `service`、`name` 为非空字符串；`start_time`、`end_time` 为带时区的 RFC3339Nano，且结束时间不早于开始时间；`status` 仅限 `unset`、`ok`、`error`；`attributes` 为键符合标识符约束、值为字符串且均非 null 的对象（允许空对象）。
 - 结构、未知字段或取值非法时整批返回 `400 {"error":{"code":"invalid_spans"}}`，不改变任何状态。
-- 相同内容再次提交（包括批内重复）计为重放；同一 `(trace_id, span_id)` 提交不同内容（时间按瞬间比较，与提交时区无关）使整批返回 `409 {"error":{"code":"span_conflict"}}`。成功原子写入，返回 `202` 及 `{"accepted":N,"replayed":M}`。
+- 相同内容再次提交（包括批内重复）计为重放；同一 `(trace_id, span_id)` 提交不同内容（时间按瞬间比较，与提交时区无关）使整批返回 `409 {"error":{"code":"span_conflict"}}`。成功原子写入，返回 `202` 及 `{"accepted":N,"replayed":M}`；采样策略任一比例小于 1 时响应另含 `sampled_out`（见采样策略接口）。
 - POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。
 
 ### 链路详情 `GET /api/v1/traces/{trace_id}`
@@ -330,6 +330,29 @@ GET /api/v1/traces/4bf92f3577b34da6a3ce929d0e0e4736
 - 没有已存跨度时返回 `404 {"error":{"code":"trace_not_found"}}`；仅有相同编号的日志不会创建链路。
 - 路径编号非法返回 `400 {"error":{"code":"invalid_trace_id"}}`；该端点不接受任何查询参数，非法查询字符串返回 `400 {"error":{"code":"invalid_trace_query"}}`。
 - GET 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET`。
+
+## 采样策略接口
+
+每个租户独立的确定性摄入采样策略只保存在进程内存中，新租户与重启后的默认值均为 `{"log_rate":1,"trace_rate":1}`。
+
+### 读取与替换 `GET` / `PUT /api/v1/sampling-policy`
+
+```
+GET /api/v1/sampling-policy        → 200 {"log_rate":1,"trace_rate":1}
+PUT /api/v1/sampling-policy        {"log_rate":0.5,"trace_rate":0.25}
+```
+
+- GET 返回当前租户策略；PUT 仅接受 `Content-Type: application/json`（否则 `415 unsupported_media_type`），正文必须恰好包含 `log_rate` 与 `trace_rate` 两个字段，均为 0 到 1 之间（含端点）的有限数；字段缺失、多余、为 null、类型错误或越界统一返回 `400 {"error":{"code":"invalid_sampling_policy"}}`，不改变现有策略。PUT 成功时原子替换整个策略并返回 `200` 与新策略。
+- GET 不接受任何查询参数，携带查询字符串返回 `400 {"error":{"code":"invalid_sampling_query"}}`；GET/PUT 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET, PUT`。
+- 该端点同样遵守 `X-SignalWatch-Tenant` 隔离，`invalid_tenant` 优先于媒体类型、正文与查询校验。
+
+### 摄入采样语义
+
+- 判定是确定性的：无 `trace_id` 的日志按日志 `id` 与 `log_rate` 决定去留；带 `trace_id` 的日志与全部跨度按 `trace_id` 与 `trace_rate` 决定，因此同一链路的日志与跨度去留一致，且同一租户、同一身份在相同策略下不受批次拆分、到达顺序或重放影响。
+- 格式校验、批内重复识别以及与已保留记录的重放或冲突判定仍先于采样：任一非法项或冲突使整批按现有错误码失败且不改变状态；已保留身份即使后来降低比例，也继续按既有内容执行 replay 或 conflict。
+- 采样只作用于尚未保留的合法项；保留项沿用现有提交顺序和原子性。丢弃项不占用 id、容量或分页快照，也不出现在日志检索和链路详情中。
+- 两个比例均为 1 时，`POST /api/v1/logs` 与 `POST /api/v1/spans` 的既有行为与响应保持不变；任一比例小于 1 时，成功响应仍为 `202`，并在 `accepted`、`replayed` 之外增加 `sampled_out`，三者之和等于请求数组长度。
+- 策略更新不追溯删除现有数据；此前被丢弃且从未保留的身份可在提高比例后重新提交，并按新策略判断。
 
 ## 服务发现目标接口
 

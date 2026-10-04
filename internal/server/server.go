@@ -91,6 +91,10 @@ type metricStore struct {
 	// commits and trace reads share the logs snapshot they join against.
 	spans map[string]*span
 
+	// Deterministic ingest sampling policy; same lock so a policy swap is
+	// atomic with respect to the log/span commits it governs.
+	sampling samplingPolicy
+
 	// Discovery target snapshot; same lock so reloads swap one immutable
 	// snapshot pointer and queries always read a consistent generation.
 	discovery *discoverySnapshot
@@ -106,6 +110,7 @@ func newMetricStore() *metricStore {
 		slos:               make(map[string]*sloDefinition),
 		logs:               make(map[string]*logEntry),
 		spans:              make(map[string]*span),
+		sampling:           defaultSamplingPolicy(),
 		discovery:          emptyDiscoverySnapshot(),
 	}
 }
@@ -364,6 +369,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerQueryRangeHandler(mux)
 	registerLogHandlers(mux)
 	registerSpanHandlers(mux)
+	registerSamplingPolicyHandlers(mux)
 	registerDiscoveryTargetHandlers(mux)
 
 	return withTenants(mux, registry)

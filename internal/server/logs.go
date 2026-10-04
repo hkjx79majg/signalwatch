@@ -59,11 +59,15 @@ func (e *logEntry) sameContent(other *logEntry) bool {
 }
 
 // checkAndApplyLogs validates the batch against committed state (and against
-// itself) and then commits it in array order. A false result signals a
-// content conflict on a repeated id; in that case no state is mutated.
-// Replays — repeats of an id with identical content — are counted but do not
-// mutate state or refresh eviction order.
-func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed int, ok bool) {
+// itself) and then commits it in array order. A false ok signals a content
+// conflict on a repeated id; in that case no state is mutated. Replays —
+// repeats of an id with identical content — are counted but do not mutate
+// state or refresh eviction order. Conflict and replay detection always runs
+// before sampling: only ids not yet retained are subject to the tenant's
+// sampling policy, and dropped entries leave no trace — they take no id, no
+// capacity and no commit sequence. sampling reports whether the policy in
+// effect had any rate below 1, so the response can carry sampled_out.
+func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed, sampledOutN int, sampling, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -73,21 +77,33 @@ func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed i
 	for _, e := range batch {
 		if prev, dup := seen[e.id]; dup {
 			if !prev.sameContent(e) {
-				return 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			continue
 		}
 		if existing, committed := s.logs[e.id]; committed && !existing.sameContent(e) {
-			return 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		seen[e.id] = e
 	}
 
 	// Second pass: commit in array order, then evict the oldest ids until
-	// the tenant is back within the retention bound.
+	// the tenant is back within the retention bound. Entries without a
+	// trace id sample on their own id at log_rate; traced entries sample on
+	// the trace id at trace_rate, staying consistent with the trace's spans.
+	policy := s.sampling
+	sampling = policy.active()
 	for _, e := range batch {
 		if _, exists := s.logs[e.id]; exists {
 			replayed++
+			continue
+		}
+		identity, rate := e.id, policy.LogRate
+		if e.traceID != "" {
+			identity, rate = e.traceID, policy.TraceRate
+		}
+		if sampledOut(identity, rate) {
+			sampledOutN++
 			continue
 		}
 		s.logSeq++
@@ -103,7 +119,7 @@ func (s *metricStore) checkAndApplyLogs(batch []*logEntry) (accepted, replayed i
 		}
 		s.logOrder = append([]string(nil), s.logOrder[excess:]...)
 	}
-	return accepted, replayed, true
+	return accepted, replayed, sampledOutN, sampling, true
 }
 
 // logFilter is the immutable condition set of a log query. A nil entry in
@@ -438,13 +454,17 @@ func handleLogsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, replayed, applied := store.checkAndApplyLogs(batch)
+	accepted, replayed, sampledOutN, sampling, applied := store.checkAndApplyLogs(batch)
 	if !applied {
 		writeAPIError(w, "log_conflict", http.StatusConflict)
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted, "replayed": replayed})
+	resp := map[string]int{"accepted": accepted, "replayed": replayed}
+	if sampling {
+		resp["sampled_out"] = sampledOutN
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func handleLogsGet(w http.ResponseWriter, r *http.Request) {

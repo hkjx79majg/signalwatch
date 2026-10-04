@@ -60,11 +60,16 @@ func spanKey(traceID, spanID string) string {
 }
 
 // checkAndApplySpans validates the batch against committed state (and against
-// itself) and then commits it in array order. A false result signals a content
+// itself) and then commits it in array order. A false ok signals a content
 // conflict on a repeated span; in that case no state is mutated. Replays —
-// repeats of a (trace_id, span_id) with identical content — are counted but do
-// not mutate state.
-func (s *metricStore) checkAndApplySpans(batch []*span) (accepted, replayed int, ok bool) {
+// repeats of a (trace_id, span_id) with identical content — are counted but
+// do not mutate state. Conflict and replay detection always runs before
+// sampling: only spans not yet retained are subject to the tenant's sampling
+// policy, decided on the trace id at trace_rate so a trace's spans and traced
+// logs are kept or dropped together. Dropped spans leave no trace.
+// sampling reports whether the policy in effect had any rate below 1, so the
+// response can carry sampled_out.
+func (s *metricStore) checkAndApplySpans(batch []*span) (accepted, replayed, sampledOutN int, sampling, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -75,27 +80,33 @@ func (s *metricStore) checkAndApplySpans(batch []*span) (accepted, replayed int,
 		key := spanKey(sp.traceID, sp.spanID)
 		if prev, dup := seen[key]; dup {
 			if !prev.sameContent(sp) {
-				return 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			continue
 		}
 		if existing, committed := s.spans[key]; committed && !existing.sameContent(sp) {
-			return 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		seen[key] = sp
 	}
 
 	// Second pass: commit in array order.
+	policy := s.sampling
+	sampling = policy.active()
 	for _, sp := range batch {
 		key := spanKey(sp.traceID, sp.spanID)
 		if _, exists := s.spans[key]; exists {
 			replayed++
 			continue
 		}
+		if sampledOut(sp.traceID, policy.TraceRate) {
+			sampledOutN++
+			continue
+		}
 		s.spans[key] = sp
 		accepted++
 	}
-	return accepted, replayed, true
+	return accepted, replayed, sampledOutN, sampling, true
 }
 
 // traceSnapshot is one consistent read of a trace's spans together with the
@@ -348,13 +359,17 @@ func handleSpansPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, replayed, applied := store.checkAndApplySpans(batch)
+	accepted, replayed, sampledOutN, sampling, applied := store.checkAndApplySpans(batch)
 	if !applied {
 		writeAPIError(w, "span_conflict", http.StatusConflict)
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted, "replayed": replayed})
+	resp := map[string]int{"accepted": accepted, "replayed": replayed}
+	if sampling {
+		resp["sampled_out"] = sampledOutN
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func handleTraceGet(w http.ResponseWriter, r *http.Request) {
