@@ -243,4 +243,6 @@ func registerDiscoveryTargetHandlers(mux *http.ServeMux) {
 		snap := tenantStore(r).reloadDiscoveryTargets(targets)
 		writeJSON(w, http.StatusOK, discoverySnapshotWireJSON(snap))
 	})
+
+	registerDiscoveryScrapeHandler(mux)
 }
