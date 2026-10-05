@@ -182,7 +182,12 @@ type sloStatusOutput struct {
 func (s *metricStore) evalSLOStatus() []sloStatusOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.evalSLOStatusLocked()
+}
 
+// evalSLOStatusLocked is evalSLOStatus for callers already holding s.mu, so
+// a wider read can fold SLO status into one shared snapshot.
+func (s *metricStore) evalSLOStatusLocked() []sloStatusOutput {
 	defs := s.snapshotSLOsLocked()
 	out := make([]sloStatusOutput, 0, len(defs))
 	for _, d := range defs {

@@ -415,6 +415,28 @@ Content-Type: application/json
 - 成功返回 `200 {"generation":N,"results":[...]}`，`results` 按编号排序，每项含 `id`、`status`（`ok` 或 `error`）与 `accepted`；失败项 `accepted` 为零并另含对应 `code`。目标按编号顺序提交；无 enabled 目标时 `results` 为空数组。
 - POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，`invalid_tenant` 优先于其他校验。
 
+## 诊断导出接口
+
+`POST /api/v1/diagnostic-export` 只读生成当前租户的 JSON 诊断包，不改变任何状态。
+
+```
+POST /api/v1/diagnostic-export
+Content-Type: application/json
+
+{"start":"2026-10-04T00:00:00Z","end":"2026-10-05T00:00:00Z",
+ "sections":["metrics","alerts","logs","traces","configuration"]}
+```
+
+- 仅接受 `application/json`（否则 `415 unsupported_media_type`）。正文必须恰好包含 `start`、`end`、`sections`：`start`、`end` 为带时区的 RFC3339Nano 且 `start < end`，跨度最多二十四小时；`sections` 为从 `metrics`、`alerts`、`logs`、`traces`、`configuration` 中选择的非空无重复数组。正文、时间、区间或节名非法统一返回 `400 {"error":{"code":"invalid_diagnostic_export"}}`。
+- 成功返回 `200`，主体含 `schema_version`（固定为 1）、`tenant`、`generated_at`、`range`（`start`/`end`）与 `sections`；所有时间统一为 UTC RFC3339Nano，`sections` 只出现所选节。各节取自请求开始时当前租户的同一一致快照，`generated_at` 即该时刻，并发变更不会混入同一导出。
+- `metrics`：`current` 沿用指标查询结构返回全部序列当前值；`samples` 返回保留期内处于 `[start,end)` 的原始观测，含 `name`、`type`、`labels`、`value`、`timestamp`，histogram 另含 `buckets`（序列固定边界），counter 保持写入增量；样本按 `timestamp`、序列规范键、提交顺序排列。
+- `alerts`：含现有告警状态（`alerts`）、通知计划（`notification_plan`，含 `deliveries` 与 `unrouted_alert_ids`）与 SLO 状态（`slo_status.slos`），语义与对应端点一致。
+- `logs`：`entries` 返回区间内仍保留的完整日志，保持日志检索的字段与排序（`timestamp` 降序、同一瞬间 `id` 升序）。
+- `traces`：`spans` 返回 `start_time` 处于区间内的完整跨度，按 `start_time`、`trace_id`、`span_id` 升序。
+- `configuration`：含告警规则（`alert_rules`）、静默（`silences`）、抑制规则（`inhibit_rules`）、通知路由（`notification_routes`）、SLO 定义（`slos`）、采样策略（`sampling_policy`）与发现目标（`discovery_targets`），各字段沿用对应读取端点的线格式。
+- 编码后结果超过 10 MiB 返回 `413 {"error":{"code":"diagnostic_export_too_large"}}`，不返回部分内容；任一数值为非有限 JSON 数时整次返回 `422 {"error":{"code":"invalid_diagnostic_export_data"}}`。
+- POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: POST`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，`invalid_tenant` 优先于媒体类型与正文校验。
+
 ## 租户隔离
 
 所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与抓取）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。

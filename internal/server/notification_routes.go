@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -272,8 +273,13 @@ type deliveryOutput struct {
 func (s *metricStore) notificationPlan() ([]deliveryOutput, []string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.notificationPlanLocked(time.Now())
+}
 
-	alerts := s.evalAlertsLocked()
+// notificationPlanLocked is notificationPlan for callers already holding
+// s.mu, evaluated at the given instant so a wider snapshot shares one "now".
+func (s *metricStore) notificationPlanLocked(now time.Time) ([]deliveryOutput, []string) {
+	alerts := s.evalAlertsLockedAt(now)
 	// Routes are sorted by id, so scanning in order and replacing the winner
 	// only on a strictly smaller priority also resolves priority ties toward
 	// the smallest id.
