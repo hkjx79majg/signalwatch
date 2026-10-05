@@ -79,6 +79,10 @@ type metricStore struct {
 	// definitions and counters from one consistent snapshot.
 	slos map[string]*sloDefinition
 
+	// Request-based rolling SLO definitions keyed by name; same lock so
+	// record commits and report evaluation share one consistent snapshot.
+	rollingSLOs map[string]*rollingSLO
+
 	// Log entries keyed by entry id; same lock so log commits and retrieval
 	// read one consistent snapshot. logOrder is the submission-order FIFO
 	// of ids used for eviction; logSeq is the commit sequence that anchors
@@ -115,6 +119,7 @@ func newMetricStore() *metricStore {
 		inhibitions:        make(map[string]*inhibitRule),
 		notificationRoutes: make(map[string]*notificationRoute),
 		slos:               make(map[string]*sloDefinition),
+		rollingSLOs:        make(map[string]*rollingSLO),
 		logs:               make(map[string]*logEntry),
 		spans:              make(map[string]*span),
 		sampling:           defaultSamplingPolicy(),
@@ -354,6 +359,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerInhibitHandlers(mux)
 	registerNotificationRouteHandlers(mux)
 	registerSLOHandlers(mux)
+	registerRollingSLOHandlers(mux)
 	registerQueryHandler(mux)
 	registerMetricRangeHandler(mux)
 	registerQueryRangeHandler(mux)
