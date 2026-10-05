@@ -258,6 +258,65 @@ SLO 定义只保存在进程内存中，重启即清空。`id` 沿用标识符�
 - 其余情况：`compliance = good_events/total_events`，`error_budget_total = total_events*(1-objective)`，`error_budget_remaining = error_budget_total-(total_events-good_events)`，`error_budget_remaining_ratio = error_budget_remaining/error_budget_total`；后两项允许为负。`compliance` 不低于 `objective` 时 `state` 为 `met`，否则为 `breached`。
 - 该端点仅支持 GET（`405 method_not_allowed`，`Allow: GET`）。
 
+## 滚动 SLO 与错误预算接口
+
+面向请求型服务的滚动 SLO 只保存在进程内存中，重启即清空。每个定义以唯一名称登记，名称区分大小写、不做修剪；登记后不可替换，定义与记录互不影响。
+
+### 登记定义 `POST /api/v1/rolling-slos`
+
+仅接受 `Content-Type: application/json`（否则 `415 unsupported_media_type`）。正文必须是恰好包含三个字段的单一对象：
+
+```json
+{"name":"checkout","objective":0.99,"window_seconds":3600}
+```
+
+- `name` 为非空且不只含空白字符的字符串；同一租户内名称唯一，重复登记返回 `400 {"error":{"code":"invalid_rolling_slo"}}`，原定义不被改变。
+- `objective` 为目标成功率，是 0 到 1 之间（不含端点）的有限数。
+- `window_seconds` 为滚动窗口时长，是正的有限秒数（允许小数，精度到纳秒）。
+- 正文不是单一对象、字段缺失或多出、类型错误或取值非法，一律返回 `400 {"error":{"code":"invalid_rolling_slo"}}`，不登记任何定义。
+- 成功返回 `201` 与定义本身。GET/POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: GET, POST`。
+
+### 查询定义 `GET /api/v1/rolling-slos`
+
+返回 `{"slos":[...]}`，每项含 `name`、`objective`、`window_seconds`，按 `name` 字典序排列；无定义时为空数组。
+
+### 写入记录 `POST /api/v1/rolling-slos/records`
+
+跟踪入口：每次写入把一批请求的总数与失败数归因到一个时刻。
+
+```json
+{"name":"checkout","timestamp":"2026-10-05T10:30:00Z","total":100,"failed":2}
+```
+
+- `timestamp` 为带时区的 RFC3339Nano（缺少时区即非法）；`total` 为非负整数；`failed` 为 0 到 `total` 之间（含端点）的整数。
+- 正文不是单一对象、字段缺失或多出、类型错误或任一取值非法，返回 `400 {"error":{"code":"invalid_rolling_slo_record"}}`，不留下任何部分数据；非 `application/json` 返回 `415 unsupported_media_type`。
+- `name` 未登记时返回 `404 {"error":{"code":"rolling_slo_not_found"}}`（在正文校验之后判定）。
+- 同一时刻的多次写入累加；乱序写入与按时间顺序写入得到相同结果。成功返回 `202 {"accepted":1}`。
+- POST 以外的方法返回 `405 method_not_allowed`，`Allow: POST`。
+
+### 查询报告 `GET /api/v1/rolling-slos/report`
+
+```
+GET /api/v1/rolling-slos/report?name=checkout&at=2026-10-05T11:00:00Z
+```
+
+- 请求必须且只能携带 `name` 与 `at` 各一次；`at` 为带时区的 RFC3339Nano。参数缺失、重复、未知或 `at` 非法（含缺少时区）返回 `400 {"error":{"code":"invalid_rolling_slo_query"}}`；`name` 未登记返回 `404 rolling_slo_not_found`。
+- 统计窗口为 `(at - window_seconds, at]`：起点不包含、终点包含，晚于 `at` 的记录不提前计入。时间比较统一按绝对瞬间处理，不同时区但代表同一瞬间的输入产生一致结果。
+- 成功返回 `200` 与报告：
+
+```json
+{"name":"checkout","objective":0.99,"window_seconds":3600,
+ "window_start":"2026-10-05T10:00:00Z","window_end":"2026-10-05T11:00:00Z",
+ "total_requests":100,"failed_requests":2,"success_rate":0.98,
+ "allowed_failures":1,"error_budget_remaining_ratio":0,"burn_rate":2}
+```
+
+- `window_start`、`window_end` 为窗口起止时刻，统一输出 UTC RFC3339Nano；`total_requests`、`failed_requests` 为窗口内累计的总请求数与失败数。
+- `success_rate = 1 - failed_requests/total_requests`；`allowed_failures = total_requests*(1-objective)`；`burn_rate = (failed_requests/total_requests)/(1-objective)`；`error_budget_remaining_ratio = max(0, 1 - failed_requests/allowed_failures)`。
+- 窗口内没有请求时，`success_rate` 与 `error_budget_remaining_ratio` 均为 1，`burn_rate` 为 0，所有计数字段为 0。
+- 每份报告都是查询时刻独立计算的不可变快照，后续写入不改变已返回的报告；不同 SLO 的样本互不污染。
+- GET 以外的方法返回 `405 method_not_allowed`，`Allow: GET`。
+
 ## 日志接口
 
 日志只保存在进程内存中，重启即清空。
@@ -447,11 +506,11 @@ Content-Type: application/json
 
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与抓取、诊断包导出）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、滚动 SLO 的登记/写入/报告、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与抓取、诊断包导出）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。
-- 每个租户拥有独立的指标序列、日志、跨度、告警规则、静默、抑制规则、通知路由、SLO 与服务发现目标快照：同名指标/标签集、同编号跨度（`trace_id`+`span_id`）与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合、链路详情的日志关联、目标快照的重载与查询均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
+- 每个租户拥有独立的指标序列、日志、跨度、告警规则、静默、抑制规则、通知路由、SLO、滚动 SLO 与服务发现目标快照：同名指标/标签集、同编号跨度（`trace_id`+`span_id`）与同编号资源可在不同租户并存，读写删及规则选择器、静默/抑制引用、路由匹配、SLO 聚合、滚动 SLO 的记录与报告、链路详情的日志关联、目标快照的重载与查询均不跨租户解析；批量提交的原子性与告警、路由计划、SLO 计算的一致快照范围均限定在当前租户。
 - 不同租户使用各自独立的锁与存储，并发访问不同租户既不会串读，也不会互相阻塞；全部状态仍只存于进程内存，重启统一清空。
 - 首次访问尚无数据的合法租户时，集合与计算端点按基线空状态响应（空数组），单项查询/删除沿用对应资源既有的 `not_found` 错误。
 - `GET /healthz` 不参与租户隔离并忽略该头；未知路径保持基线 404 行为。
