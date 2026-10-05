@@ -415,9 +415,39 @@ Content-Type: application/json
 - 成功返回 `200 {"generation":N,"results":[...]}`，`results` 按编号排序，每项含 `id`、`status`（`ok` 或 `error`）与 `accepted`；失败项 `accepted` 为零并另含对应 `code`。目标按编号顺序提交；无 enabled 目标时 `results` 为空数组。
 - POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}`，`Allow: POST`。该端点同样遵守 `X-SignalWatch-Tenant` 隔离，`invalid_tenant` 优先于其他校验。
 
+## 诊断包导出接口
+
+`POST /api/v1/diagnostic-export` 只读生成当前租户的 JSON 诊断包，不改变任何状态。仅接受 `Content-Type: application/json`，正文恰好包含 `start`、`end`、`sections`：
+
+```json
+{"start":"2026-10-02T00:00:00+08:00","end":"2026-10-02T02:00:00+08:00",
+ "sections":["metrics","alerts","logs","traces","configuration"]}
+```
+
+- `start`、`end` 为带时区的 RFC3339Nano，`start` 严格早于 `end`，跨度至多二十四小时；区间统一为半开 `[start, end)`。
+- `sections` 为非空、无重复的数组，节名仅限 `metrics`、`alerts`、`logs`、`traces`、`configuration`；响应只出现所选节，并按请求中的顺序排列。
+- 成功返回 `200`，顶层含固定为 `1` 的 `schema_version`、`tenant`、`generated_at`、`range`、`sections`；`generated_at` 与 `range` 时间统一输出为 UTC RFC3339Nano。
+- 各节取自**请求开始时当前租户的同一快照**：整包在该租户的一次读锁内组装，`generated_at` 即快照时刻（也是静默状态评估与保留裁剪的锚点），并发提交不会跨节混杂。
+
+各节内容：
+
+- `metrics`：`current` 沿用 `GET /api/v1/metrics` 的当前查询结构（counter/gauge 含 `value`，histogram 含 `count`、`sum`、累计 `buckets`），序列按名称加完整标签规范键排列；`samples` 返回保留期内（快照时刻回看二十四小时）时间落入 `[start,end)` 的原始观测，每项含 `name`、`type`、`labels`、`value`、`timestamp`，histogram 样本另含该序列固定的 `buckets`，counter 保持写入时的增量（不做累计差）。样本按 `timestamp`、名称、完整标签规范键、序列内提交顺序排列。
+- `alerts`：汇集 `alerts`（同 `GET /api/v1/alerts`）、`notification_plan`（同 `GET /api/v1/notification-plan` 的 `deliveries` 与 `unrouted_alert_ids`）与 `slos`（同 `GET /api/v1/slo-status`），三者共享同一快照与同一评估时刻。
+- `logs`：返回仍保留（未被容量淘汰）且时间落入区间的完整日志，字段同写入，按 `timestamp` 升序、同一瞬间按 `id` 升序排列。
+- `traces`：返回 `start_time` 落入区间的全部完整跨度（同跨度写入字段，`parent_span_id` 保持 `null` 或字符串），按 `start_time` 升序、同一瞬间按 `trace_id`、`span_id` 升序排列。
+- `configuration`：返回 `alert_rules`、`silences`（含按 `generated_at` 评估的 `state`）、`inhibit_rules`、`notification_routes`、`slos`、`sampling_policy` 与 `discovery_targets`，字段与排序均沿用各自读取端点。
+
+失败语义：
+
+- 正文非法、时间格式/区间非法、`sections` 缺失/为空/含未知或重复节名、字段缺失或多出等，返回 `400 {"error":{"code":"invalid_diagnostic_export"}}`；非 `application/json` 返回 `415 unsupported_media_type`。
+- 结果超过 10 MiB 时返回 `413 {"error":{"code":"diagnostic_export_too_large"}}`，整包在写出前构建并测量，因此不返回任何部分内容。
+- 包中出现非有限 JSON 数（如累计值溢出为 Inf）时返回 `422 {"error":{"code":"invalid_diagnostic_export_data"}}`，同样不返回部分结果。
+- POST 以外的方法返回 `405 {"error":{"code":"method_not_allowed"}}` 并设置 `Allow: POST`。
+- 该端点遵守 `X-SignalWatch-Tenant` 的既有校验优先级：`invalid_tenant` 先于媒体类型与正文判定，且不带租户头时固定进入 `default` 租户。
+
 ## 租户隔离
 
-所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与抓取）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
+所有已注册的 `/api/v1` 端点（指标、时序查询、表达式查询、表达式时序查询、告警规则、静默、抑制规则、通知路由、SLO 及其状态/计划计算、日志写入与检索、跨度写入与链路详情、服务发现目标的重载、查询与抓取、诊断包导出）均按租户隔离。客户端通过请求头 `X-SignalWatch-Tenant` 选择租户；不携带该头时固定进入 `default` 租户，因此不带租户头的既有客户端行为不变。
 
 - 显式租户值必须**精确**匹配 `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`，不做大小写折叠，也不修剪首尾空白。
 - 请求头缺失 → `default`；出现多个头值、空值或不符合格式的值 → 在解析媒体类型、正文与资源编号之前返回 `400 {"error":{"code":"invalid_tenant"}}`，且不改变任何租户的状态。

@@ -219,6 +219,13 @@ func (s *metricStore) deleteRule(id string) bool {
 func (s *metricStore) snapshotRules() []*alertRule {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotRulesLocked()
+}
+
+// snapshotRulesLocked is snapshotRules for callers already holding the store
+// lock, e.g. the diagnostic export which reads every section from one
+// snapshot.
+func (s *metricStore) snapshotRulesLocked() []*alertRule {
 	out := make([]*alertRule, 0, len(s.rules))
 	for _, r := range s.rules {
 		out = append(out, r)
@@ -280,6 +287,13 @@ func (s *metricStore) evalAlerts() []alertOutput {
 // already held by the caller. Callers that also need other state (e.g. the
 // notification plan's routes) share one snapshot by holding s.mu themselves.
 func (s *metricStore) evalAlertsLocked() []alertOutput {
+	return s.evalAlertsLockedAt(time.Now())
+}
+
+// evalAlertsLockedAt evaluates alerts against an explicit instant, which
+// anchors silence windowing. The diagnostic export passes its single
+// generated_at instant so every section in one package shares it.
+func (s *metricStore) evalAlertsLockedAt(now time.Time) []alertOutput {
 	rules := make([]*alertRule, 0, len(s.rules))
 	for _, r := range s.rules {
 		rules = append(rules, r)
@@ -295,7 +309,6 @@ func (s *metricStore) evalAlertsLocked() []alertOutput {
 		inhibitRules = append(inhibitRules, ir)
 	}
 	// Evaluation instant and silence windowing share the snapshot.
-	now := time.Now()
 	activeByRule := activeSilencesByRule(silences, now)
 
 	out := make([]alertOutput, 0, len(rules))

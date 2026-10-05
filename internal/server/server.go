@@ -235,25 +235,7 @@ func (s *metricStore) query(name string, selector map[string]string) []seriesOut
 		if !matched {
 			continue
 		}
-		item := seriesOutput{
-			Name:   cur.name,
-			Type:   cur.typ,
-			Labels: copyLabels(cur.labels),
-		}
-		switch cur.typ {
-		case "counter", "gauge":
-			v := cur.value
-			item.Value = &v
-		case "histogram":
-			c, sum := cur.count, cur.sum
-			item.Count = &c
-			item.Sum = &sum
-			item.Buckets = make([]bucketOutput, len(cur.bucketBounds))
-			for i, bound := range cur.bucketBounds {
-				item.Buckets[i] = bucketOutput{LE: bound, Count: cur.bucketCounts[i]}
-			}
-		}
-		out = append(out, item)
+		out = append(out, currentSeriesOutput(cur))
 	}
 
 	sort.Slice(out, func(i, j int) bool {
@@ -379,6 +361,7 @@ func newHandler(registry *tenantRegistry) http.Handler {
 	registerSpanHandlers(mux)
 	registerSamplingPolicyHandlers(mux)
 	registerDiscoveryTargetHandlers(mux)
+	registerDiagnosticExportHandler(mux)
 
 	return withTenants(mux, registry)
 }

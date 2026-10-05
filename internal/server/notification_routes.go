@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -272,8 +273,20 @@ type deliveryOutput struct {
 func (s *metricStore) notificationPlan() ([]deliveryOutput, []string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.notificationPlanLockedAt(time.Now())
+}
 
-	alerts := s.evalAlertsLocked()
+// notificationPlanLockedAt is notificationPlan for callers already holding
+// the store lock; the given instant anchors silence state so the plan is
+// consistent with alerts evaluated from the same snapshot and instant.
+func (s *metricStore) notificationPlanLockedAt(now time.Time) ([]deliveryOutput, []string) {
+	return s.planFromAlertsLocked(s.evalAlertsLockedAt(now))
+}
+
+// planFromAlertsLocked derives the delivery plan from an alert slice already
+// evaluated under the caller's snapshot. The diagnostic export uses it so the
+// plan in the alerts section is exactly consistent with the emitted alerts.
+func (s *metricStore) planFromAlertsLocked(alerts []alertOutput) ([]deliveryOutput, []string) {
 	// Routes are sorted by id, so scanning in order and replacing the winner
 	// only on a strictly smaller priority also resolves priority ties toward
 	// the smallest id.
@@ -305,8 +318,6 @@ func (s *metricStore) notificationPlan() ([]deliveryOutput, []string) {
 		})
 	}
 
-	// Alert evaluation already returns alerts sorted by id, but enforce the
-	// documented output order explicitly.
 	sort.Slice(deliveries, func(i, j int) bool { return deliveries[i].AlertID < deliveries[j].AlertID })
 	sort.Strings(unrouted)
 	return deliveries, unrouted

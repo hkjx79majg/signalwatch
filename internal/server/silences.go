@@ -154,6 +154,12 @@ func (s *metricStore) deleteSilence(id string) bool {
 func (s *metricStore) snapshotSilences() []*silence {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotSilencesLocked()
+}
+
+// snapshotSilencesLocked is snapshotSilences for callers already holding the
+// store lock, so one read snapshot spans every exported section.
+func (s *metricStore) snapshotSilencesLocked() []*silence {
 	out := make([]*silence, 0, len(s.silences))
 	for _, sil := range s.silences {
 		out = append(out, sil)

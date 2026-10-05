@@ -182,7 +182,12 @@ type sloStatusOutput struct {
 func (s *metricStore) evalSLOStatus() []sloStatusOutput {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.evalSLOStatusLocked()
+}
 
+// evalSLOStatusLocked is evalSLOStatus for callers already holding the store
+// lock, so the diagnostic package's SLO section shares one snapshot.
+func (s *metricStore) evalSLOStatusLocked() []sloStatusOutput {
 	defs := s.snapshotSLOsLocked()
 	out := make([]sloStatusOutput, 0, len(defs))
 	for _, d := range defs {

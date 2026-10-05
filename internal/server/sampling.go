@@ -37,6 +37,11 @@ func (s *metricStore) getSampling() samplingPolicy {
 	return s.sampling
 }
 
+// samplingLocked is getSampling for callers already holding the store lock.
+func (s *metricStore) samplingLocked() samplingPolicy {
+	return s.sampling
+}
+
 // setSampling atomically replaces the tenant's policy. Existing data is
 // never touched; the new policy only governs future ingest decisions.
 func (s *metricStore) setSampling(p samplingPolicy) {

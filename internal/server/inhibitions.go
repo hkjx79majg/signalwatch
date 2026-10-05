@@ -137,6 +137,12 @@ func (s *metricStore) deleteInhibitRule(id string) bool {
 func (s *metricStore) snapshotInhibitRules() []*inhibitRule {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotInhibitRulesLocked()
+}
+
+// snapshotInhibitRulesLocked is snapshotInhibitRules for callers already
+// holding the store lock, so one read snapshot spans every exported section.
+func (s *metricStore) snapshotInhibitRulesLocked() []*inhibitRule {
 	out := make([]*inhibitRule, 0, len(s.inhibitions))
 	for _, r := range s.inhibitions {
 		out = append(out, r)
